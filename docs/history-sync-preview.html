@@ -1,0 +1,785 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>History sync — interactive preview</title>
+<style>
+:root{color-scheme:light;font:15px/1.5 system-ui,sans-serif;color:#272724;background:#f4f3ee}
+*{box-sizing:border-box}body{margin:0 auto;padding:32px 20px;max-width:1000px}h1{font-size:26px;margin:8px 0}p{max-width:750px}.muted{color:#74736d}.error{color:#ad2d20}
+.badge{font-size:12px;font-weight:650;letter-spacing:.1em;text-transform:uppercase;color:#7e502e}.box{display:flex;min-width:0}.text{white-space:pre-wrap;overflow-wrap:anywhere}
+button,select{font:inherit;border:1px solid #d6d3ca;background:#fcfbf8;border-radius:6px;padding:5px 10px;color:inherit}button{cursor:pointer}button:hover{background:#eeeae0}button:focus-visible,select:focus-visible{outline:2px solid #996044;outline-offset:2px}
+.stage{margin-top:24px;border:1px solid #d6d3ca;border-radius:12px;background:#fcfbf8;padding:20px}.conversation{height:160px;display:grid;place-items:center;color:#95938a}.prompt{margin-top:14px;padding:20px;border:1px solid #d6d3ca;border-radius:10px;color:#8b897e}.tools{display:flex;flex-wrap:wrap;align-items:center;gap:18px;margin:24px 0;font-size:13px}.tools label{display:flex;gap:6px;align-items:center}
+.picker{display:flex;flex-direction:column;gap:5px}.picker select{width:100%}#menu{margin-top:20px;border:1px solid #d6d3ca;border-radius:10px;background:white;padding:12px}#menu[hidden]{display:none}.menu-top{display:flex;justify-content:space-between;align-items:center;padding:0 8px 8px;border-bottom:1px solid #e6e4dc;margin-bottom:8px;font-size:12px;color:#74736d}code{font-size:12px;overflow-wrap:anywhere}header{display:flex;align-items:center;flex-wrap:wrap;gap:12px}aside{border:1px dashed #c5c0b4;border-radius:8px;padding:10px;margin:16px 0}.footer{display:flex;flex-wrap:wrap;align-items:center;gap:12px;padding-top:8px}
+</style>
+<header><span class="badge">Version 0.5.0 · UI comparison</span><h1>History sync</h1></header>
+<p>Compare three native locations and three DOM launchers. This preview uses the production controller and both UI implementations with fixture accounts. Every operation is simulated; it cannot read or change account files.</p>
+<p class="muted">Claude supplies the final styling and pane placement. This is a layout and interaction preview. Automatic timers are disabled here; Start performs one simulated copy.</p>
+<aside aria-label="Sidebar">Example Desktop sidebar</aside>
+<div class="stage"><div class="conversation">Your Code conversation</div><div id="band"></div><div class="prompt">Write a prompt…</div><div class="footer"><span class="muted">Auto · Mode area</span><div id="mode"></div></div><div class="footer"><span class="muted">Prompt hint area</span><div id="hint"></div></div><section id="menu" hidden aria-label="History sync settings"><div class="menu-top"><span>Settings pane</span><button id="close">Close</button></div><div id="pane"></div></section></div>
+<div class="tools"><button id="reload">Simulate session reload</button><button id="remove-dom">Remove DOM launchers</button><label><input id="failure" type="checkbox">Simulate copy failure</label><label><input id="ambiguous" type="checkbox">Session found in both accounts</label></div>
+<p class="muted">Simulated helper operations: <code id="operations"></code></p><p id="preview-error" class="error"></p>
+<textarea id="copy-output" hidden readonly aria-label="Selectable copy text" style="width:100%;height:160px"></textarea>
+<script type="module">const PROFILE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\\[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function describeResult(result) {
+  const mode = result.Action === 'Plan' ? 'Preview' : 'Synced';
+  return `${mode}: ${result.Additions ?? 0} added, ${result.Updates ?? 0} updated, ${result.Conflicts ?? 0} conflicts, ${result.Skipped ?? 0} skipped.`;
+}
+
+function createController() {
+  const view = {
+    profiles: [], source: '', sourceCandidates: [], target: '', enabled: false, busy: false,
+    status: 'Finding the account for this session…', error: '',
+    backup: '', report: [], previewRows: [], previewFilter: 'all', previewChanges: 'all', previewSearch: '', previewPage: 0,
+    selectedPreview: '', configPath: '', lastSync: '', copyStatus: '',
+    section: 'accounts', expanded: false, promptDisplay: 'launcher', launcherPlacement: 'all', preview: null, lastResult: null, receipts: [], notice: '',
+  };
+  let api;
+  let owner = '';
+  let configOverride = '';
+  let running = null;
+  let ended = false;
+  let interval = null;
+  let debounce = null;
+  let revision = 0;
+
+  function redraw() { api.redraw('ui.render'); }
+  async function remember(key, value) {
+    try { await api.storeSet(key, value); }
+    catch { view.notice = 'Could not remember preferences or recent results. Any backup already created remains on disk.'; redraw(); }
+  }
+  function showSection(section) {
+    if (!['accounts', 'sync', 'backups'].includes(section)) return;
+    view.section = section; redraw();
+  }
+  function filterPreview(value) {
+    if (!['all', 'active', 'archived'].includes(value)) return;
+    view.previewFilter = value; view.previewPage = 0; redraw();
+  }
+  function filterPreviewChanges(value) {
+    if (!['all', 'changes', 'issues'].includes(value)) return;
+    view.previewChanges = value; view.previewPage = 0; redraw();
+  }
+  function searchPreview(value) { view.previewSearch = String(value).slice(0, 200); view.previewPage = 0; redraw(); }
+  function pagePreview(value) { if (Number.isInteger(value) && value >= 0) { view.previewPage = value; redraw(); } }
+  function selectPreview(file) { if (view.previewRows.some(r => r.File === file)) { view.selectedPreview = view.selectedPreview === file ? '' : file; redraw(); } }
+  function clearPreview() { view.report = []; view.previewRows = []; view.preview = null; view.previewPage = 0; view.selectedPreview = ''; }
+  async function copyText(text, writer, surface) {
+    try {
+      const result = await writer(text, surface);
+      view.copyStatus = result?.isCopied ? 'Copied to clipboard.' : `Could not copy to clipboard (${result?.reason || 'unavailable'}).`;
+    } catch (error) { view.copyStatus = `Copy failed: ${error.message}`; }
+    redraw();
+  }
+  async function toggleDetails() {
+    view.expanded = !view.expanded; redraw();
+    await remember('expanded', view.expanded);
+  }
+  async function choosePromptDisplay(value) {
+    if (!['launcher', 'compact', 'hidden'].includes(value)) return;
+    view.promptDisplay = value; redraw();
+    await remember('promptDisplay', value);
+  }
+  async function chooseLauncherPlacement(value) {
+    if (!['all', 'band', 'mode', 'hint'].includes(value)) return;
+    view.launcherPlacement = value; redraw();
+    await remember('launcherPlacement', value);
+  }
+  async function rememberBackup(result, pair) {
+    const receipt = { backup: result.Backup, source: pair?.source || '', target: pair?.target || '',
+      at: new Date(await api.now()).toISOString(), status: result.Ok ? 'complete' : 'prepared',
+      message: result.Ok ? describeResult(result) : result.Error || 'Sync interrupted; inspect this backup before retrying.' };
+    view.receipts = [receipt, ...view.receipts.filter(r => r.backup !== receipt.backup)].slice(0, 8);
+    await remember('receipts', view.receipts);
+  }
+  function selectedPair() {
+    if (!PROFILE_ID.test(view.source)) throw new Error('Confirm which account is open in Sync settings first.');
+    if (!PROFILE_ID.test(view.target)) throw new Error('Choose an inactive destination account first.');
+    if (view.source === view.target) throw new Error('Source and destination must be different.');
+    if (!view.profiles.some(p => p.Id === view.source) || !view.profiles.some(p => p.Id === view.target)) {
+      throw new Error('A selected profile is no longer available. Refresh profiles.');
+    }
+    return { source: view.source, target: view.target };
+  }
+  async function bridge(action, pair, keepLease = false) {
+    if (api.windows === false) throw new Error('Account history sync runs on native Windows sessions.');
+    const argv = ['powershell.exe', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+      '-File', `${api.root}/scripts/HistorySync-Bridge.ps1`, '-Action', action];
+    if (configOverride) argv.push('-ConfigPath', configOverride);
+    if (pair) argv.push('-SourceProfile', pair.source, '-TargetProfile', pair.target);
+    if (action !== 'Release') argv.push('-SessionId', owner);
+    if (['Arm', 'Sync', 'Release'].includes(action)) argv.push('-OwnerSession', owner);
+    if (keepLease) argv.push('-KeepLease');
+    const processResult = await api.processRun(argv, { timeoutMs: 90_000 });
+    let result;
+    try { result = JSON.parse(processResult.stdout.trim()); }
+    catch { throw new Error(`History helper returned invalid output (exit ${processResult.exitCode}). ${processResult.stderr?.slice(0, 500) || ''}`); }
+    if (result.Backup) { view.backup = result.Backup; await rememberBackup({ ...result, Ok: result.Ok && processResult.exitCode === 0 }, pair); }
+    if (result.ConfigPath) view.configPath = result.ConfigPath;
+    if (processResult.exitCode !== 0 || !result.Ok) throw new Error(result.Error || processResult.stderr || 'History helper failed.');
+    return result;
+  }
+  async function release() {
+    if (!owner) return;
+    try { await bridge('Release'); }
+    catch (error) { view.error = `Paused; controller lease expires within three minutes. ${error.message}`; }
+  }
+  async function run(label, work) {
+    if (ended || running) return null;
+    view.busy = true; view.error = ''; view.status = label; redraw();
+    // Promise.resolve defers work until running is assigned, including synchronous failures.
+    running = Promise.resolve().then(work).catch(async error => {
+      view.enabled = false;
+      view.error = error.message;
+      view.status = 'Sync paused after an error.';
+      await release();
+      return null;
+    }).finally(() => { running = null; view.busy = false; redraw(); });
+    return running;
+  }
+  async function sync(automatic = false) {
+    if (automatic && !view.enabled) return null;
+    return run('Checking saved history…', async () => {
+      const pair = selectedPair();
+      const result = await bridge('Sync', pair, view.enabled);
+      view.status = describeResult(result);
+      const at = new Date(await api.now()).toISOString();
+      view.lastSync = new Date(at).toLocaleTimeString();
+      view.lastResult = { source: pair.source, target: pair.target, at, message: view.status, backup: result.Backup || '' };
+      await remember('lastResult', view.lastResult);
+      if (result.Backup) api.log(`History backup: ${result.Backup}`);
+      return result;
+    });
+  }
+  async function pause() {
+    revision += 1;
+    view.enabled = false;
+    debounce?.cancel(); debounce = null;
+    redraw();
+    if (running) await running;
+    view.enabled = false;
+    await release();
+    view.status = 'Auto-sync paused.';
+    redraw();
+  }
+  async function refresh() {
+    return run('Finding local profiles…', async () => {
+      const result = await bridge('Profiles');
+      view.profiles = result.Profiles || [];
+      view.sourceCandidates = result.SessionProfiles || [];
+      const previousSource = view.source;
+      const previousTarget = view.target;
+      const wasEnabled = view.enabled;
+      if (view.source && !view.profiles.some(p => p.Id === view.source)) view.source = '';
+      if (result.CurrentProfile) view.source = result.CurrentProfile;
+      else if (view.sourceCandidates.length && !view.sourceCandidates.includes(view.source)) view.source = '';
+      if (previousSource !== view.source) {
+        revision += 1; view.enabled = false;
+        debounce?.cancel(); debounce = null;
+        if (previousSource) await release();
+      }
+      if (view.target && !view.profiles.some(p => p.Id === view.target)) { view.target = ''; view.enabled = false; }
+      if (view.target === view.source) view.target = '';
+      if (previousSource === view.source && previousTarget !== view.target && wasEnabled) await release();
+      if (previousSource !== view.source || previousTarget !== view.target) clearPreview();
+      view.status = view.source ? 'This account → inactive destination. Choose a destination and sync.' :
+        view.sourceCandidates.length > 1 ? 'This session exists in several accounts. Confirm the open account in Sync settings.' :
+        'No account folder identifies this session yet. Confirm the open account in Sync settings, or refresh after a turn.';
+      return result;
+    });
+  }
+  async function choose(source, target) {
+    if (view.source && source !== view.source) throw new Error('Source is this session’s account. Switch accounts and open a fresh session to reverse the direction.');
+    if (source && (!view.profiles.some(p => p.Id === source) || (view.sourceCandidates.length && !view.sourceCandidates.includes(source)))) {
+      throw new Error('The chosen source does not contain this session. Refresh profiles.');
+    }
+    // Confirming an ambiguous source is session-local, never a saved login assumption.
+    await pause();
+    if (view.source && source !== view.source) throw new Error('The current source changed while waiting. Choose the destination again.');
+    view.source = source; view.target = target;
+    clearPreview();
+    await remember('destination', target);
+    view.status = source ? 'This account → selected destination. Destination must be inactive.' : 'Destination selected. Confirm the open account in Sync settings.';
+    redraw();
+  }
+  async function preview() {
+    return run('Building a read-only preview…', async () => {
+      const result = await bridge('Plan', selectedPair());
+      view.report = result.Report || [];
+      view.previewRows = Array.isArray(result.Rows) ? result.Rows : [];
+      view.previewPage = 0; view.selectedPreview = '';
+      view.status = describeResult(result);
+      view.preview = { source: view.source, target: view.target, message: view.status,
+        writes: result.Writes ?? 0, reportTotal: result.ReportTotal ?? view.report.length,
+        reportTruncated: result.ReportTruncated === true, rowsTotal: result.RowsTotal ?? view.previewRows.length,
+        rowsTruncated: result.RowsTruncated === true, at: new Date(await api.now()).toISOString() };
+      return result;
+    });
+  }
+  async function start() {
+    const startingRevision = revision;
+    const result = await run('Starting auto-sync…', async () => {
+      const pair = selectedPair();
+      await bridge('Arm', pair);
+      if (ended || startingRevision !== revision) { await release(); return null; }
+      view.enabled = true;
+      view.status = 'Auto-sync active: source → destination every 30 seconds.';
+      return true;
+    });
+    if (result && view.enabled) await sync(true);
+  }
+  function stop() {
+    revision += 1;
+    ended = true; view.enabled = false;
+    interval?.cancel(); debounce?.cancel();
+  }
+  async function initialize(adapter) {
+    api = adapter;
+    if (api.windows === false) {
+      view.error = 'Account history sync runs on native Windows sessions.';
+      return;
+    }
+    owner = await api.sessionId();
+    configOverride = (await api.envGet('ACCOUNT_HISTORY_SYNC_CONFIG')) || '';
+    view.source = ''; view.sourceCandidates = [];
+    const saved = await api.storeGet('destination');
+    view.target = typeof saved === 'string' ? saved : '';
+    view.expanded = (await api.storeGet('expanded')) === true;
+    const promptDisplay = await api.storeGet('promptDisplay');
+    view.promptDisplay = ['launcher', 'compact', 'hidden'].includes(promptDisplay) ? promptDisplay : 'launcher';
+    const placement = await api.storeGet('launcherPlacement');
+    view.launcherPlacement = ['all', 'band', 'mode', 'hint'].includes(placement) ? placement : 'all';
+    const receipts = await api.storeGet('receipts');
+    view.receipts = Array.isArray(receipts) ? receipts.filter(r => r && typeof r.backup === 'string' && r.backup && typeof r.message === 'string' &&
+      PROFILE_ID.test(r.source) && PROFILE_ID.test(r.target) && !Number.isNaN(Date.parse(r.at)) &&
+      ['complete', 'prepared'].includes(r.status)).slice(0, 8) : [];
+    view.backup = view.receipts[0]?.backup || '';
+    const lastResult = await api.storeGet('lastResult');
+    view.lastResult = lastResult && PROFILE_ID.test(lastResult.source) && PROFILE_ID.test(lastResult.target) &&
+      typeof lastResult.message === 'string' && !Number.isNaN(Date.parse(lastResult.at)) ? lastResult : null;
+    view.lastSync = view.lastResult ? new Date(view.lastResult.at).toLocaleTimeString() : '';
+    // Never persist auto-enable across sessions, login changes or hot reloads.
+    await release();
+    await refresh();
+    interval = api.every(30_000, async () => { if (ended) return; if (view.enabled) await sync(true); else if (!view.source) await refresh(); });
+  }
+  function afterTurn() {
+    if (ended) return;
+    if (!view.enabled && view.source) return;
+    debounce?.cancel();
+    debounce = api.after(1500, async () => { if (ended) return; if (view.enabled) await sync(true); else if (!view.source) await refresh(); });
+  }
+  async function reopen() {
+    if (!ended) return;
+    if (running) await running;
+    await release();
+    ended = false;
+    view.enabled = false; view.error = '';
+    interval = null; debounce = null;
+    await initialize(api);
+    view.status = `Session changed; auto-sync paused. ${view.status}`;
+    redraw();
+  }
+  function resolveSelector(selector) {
+    const matches = view.profiles.filter(p => p.Id === selector || p.Email?.toLowerCase() === selector.toLowerCase());
+    if (matches.length !== 1) throw new Error('Profile selector is unknown or ambiguous. Use a full profile ID from /history-sync profiles.');
+    return matches[0].Id;
+  }
+  function statusText() {
+    return `${view.enabled ? 'Auto-sync active' : 'Auto-sync paused'}; ${view.source || '(confirm open account)'} → ${view.target || '(choose destination)'}. ${view.status}${view.error ? ` ${view.error}` : ''}`;
+  }
+  return { view, initialize, refresh, choose, preview, start, pause, sync, stop, afterTurn, reopen, resolveSelector, statusText,
+    showSection, toggleDetails, choosePromptDisplay, chooseLauncherPlacement, copyText,
+    filterPreview, filterPreviewChanges, searchPreview, pagePreview, selectPreview };
+}
+
+function accountLabel(view, id, empty = 'Choose destination') {
+  if (!id) return empty;
+  const profile = view.profiles.find(p => p.Id === id);
+  const [account, org] = id.split('\\');
+  const name = profile?.Email || (profile?.Label && profile.Label !== account ? profile.Label : `Account ${account.slice(0, 8)}`);
+  // Organizations can share an email; keep them distinguishable in every picker.
+  return `${name} · ${org?.slice(0, 8) || ''}`;
+}
+
+function mode(view) {
+  if (view.error) return 'Error · auto-sync paused';
+  if (view.busy) return 'Working…';
+  return view.enabled ? 'Auto · every 30s' : 'Paused';
+}
+
+function samePair(view, result) {
+  return result && result.source === view.source && result.target === view.target;
+}
+
+function time(at, full = false) {
+  return full ? new Date(at).toLocaleString() : new Date(at).toLocaleTimeString();
+}
+
+function action(Button, controller, key, label, work, needsPair = false) {
+  const v = controller.view;
+  const ready = !needsPair || Boolean(v.source && v.target && v.source !== v.target);
+  return Button({ key, label, dimColor: v.busy || !ready, onPress: async () => {
+    await controller.reopen();
+    if (!v.busy && (!needsPair || (v.source && v.target && v.source !== v.target))) await work();
+  } });
+}
+
+function automatic(Button, controller) {
+  const v = controller.view;
+  return Button({ key: 'auto', label: v.enabled ? 'Pause auto-sync' : 'Start auto-sync',
+    dimColor: !v.enabled && (v.busy || !v.source || !v.target || v.source === v.target), onPress: async () => {
+      await controller.reopen();
+      if (v.enabled) await controller.pause();
+      else if (!v.busy && v.source && v.target && v.source !== v.target) await controller.start();
+    } });
+}
+
+function launcherVisible(view, site) {
+  return view.promptDisplay !== 'hidden' && (view.launcherPlacement === 'all' || view.launcherPlacement === site);
+}
+
+function renderLauncher({ Box, Button }, controller, openSettings, site) {
+  const v = controller.view;
+  const location = v.launcherPlacement === 'all' ? ` · ${ {band:'Prompt', mode:'Mode', hint:'Hint'}[site] }` : '';
+  const status = v.error ? ' · needs attention' : v.enabled ? ' · Auto' : '';
+  return Box({ flexDirection: 'row', flexWrap: 'wrap', gap: 1, children: [
+    Button({ key: site === 'band' ? 'settings' : `settings-${site}`, label: `History sync${location}${status}`,
+      ...(site === 'band' ? {hotkey: 's'} : {}), onPress: openSettings }),
+    ...(v.enabled ? [automatic(Button, controller)] : []),
+  ] });
+}
+
+function renderBand({ Box, Text, Button }, controller, openSettings) {
+  const v = controller.view;
+  if (v.promptDisplay === 'hidden') return null;
+  if (v.promptDisplay !== 'compact') return renderLauncher({ Box, Button }, controller, openSettings, 'band');
+  const direction = `${accountLabel(v, v.source, 'Confirm this account')} → ${accountLabel(v, v.target)}`;
+  const last = samePair(v, v.lastResult) ? ` · Last ${time(v.lastResult.at)}` : '';
+  return Box({ flexDirection: 'column', children: [
+    Box({ flexDirection: 'row', flexWrap: 'wrap', gap: 1, children: [
+      Text({ bold: true, children: `History sync · ${mode(v)}` }),
+      action(Button, controller, 'sync', 'Sync now', () => controller.sync(), true),
+      ...(v.enabled ? [automatic(Button, controller)] : []),
+      Button({ key: 'settings', label: 'Sync settings', hotkey: 's', onPress: openSettings }),
+      Button({ key: 'details', label: v.expanded ? 'Less' : 'Details', onPress: () => controller.toggleDetails() }),
+    ] }),
+    Text({ dimColor: true, children: `${direction}${last}` }),
+    ...(v.error ? [Text({ color: 'red', children: v.error })] : []),
+    ...(v.busy ? [Text({ children: v.status })] : []),
+    ...(v.expanded ? [
+      Text({ children: samePair(v, v.lastResult) ? v.lastResult.message : v.source && v.target ? 'Ready to preview or sync this direction.' : 'Choose an inactive destination in Sync settings.' }),
+      ...(samePair(v, v.lastResult) && v.lastResult.backup ? [Text({ dimColor: true, children: 'Verified backup saved · details in Backups' })] : []),
+      Text({ dimColor: true, children: 'Source stays untouched. Pause before switching accounts.' }),
+    ] : []),
+  ] });
+}
+
+function profilesText(view) {
+  return view.profiles.map(p => `${accountLabel(view, p.Id)} | ${p.Id} | ${p.Sessions} sessions`).join('\n');
+}
+
+function filteredPreviewRows(view) {
+  const search = view.previewSearch.trim().toLocaleLowerCase();
+  return view.previewRows.filter(r =>
+    (view.previewFilter === 'all' || (r.After && (view.previewFilter === 'archived' ? r.After.Archived : !r.After.Archived))) &&
+    (view.previewChanges === 'all' || (view.previewChanges === 'changes' ? ['Add','Update'].includes(r.Action) : ['Conflict','Skipped'].includes(r.Action))) &&
+    (!search || [r.Title,r.Before?.Title,r.After?.Title].some(t => t?.toLocaleLowerCase().includes(search)))
+  ).sort((a,b) => a.Title.localeCompare(b.Title) || a.File.localeCompare(b.File));
+}
+
+function archiveState(state) { return state ? state.Archived ? 'Archived' : 'Active' : 'Not present'; }
+
+function previewTableText(rows) {
+  const cell = text => String(text ?? '').replace(/[\t\r\n]+/g,' ');
+  return [['Session','Change','Before title','Before state','After title','After state','Reason','Session file'],
+    ...rows.map(r => [r.Title,r.Action,r.Before?.Title,archiveState(r.Before),r.After?.Title,archiveState(r.After),r.Detail,r.File]),
+  ].map(row => row.map(cell).join('\t')).join('\n');
+}
+
+function previewText(view) {
+  const p = view.preview;
+  if (!p) return '';
+  return ['Preview only — no history writes performed.',
+    `From: ${accountLabel(view, p.source)} | ${p.source}`,
+    `To: ${accountLabel(view, p.target)} | ${p.target}`, time(p.at, true), p.message,
+    `Planned operations: ${p.writes}`,
+    ...(view.previewRows.length ? [previewTableText(view.previewRows)] : view.report.map(r => `${r.Action}: ${r.File}\n${r.Detail}`)),
+    ...(p.reportTruncated ? [`Report limited to ${view.report.length} of ${p.reportTotal} entries.`] : []),
+    ...(p.rowsTruncated ? [`Comparison limited to ${view.previewRows.length} of ${p.rowsTotal} sessions.`] : []),
+  ].join('\n');
+}
+
+function diagnosticsText(view) {
+  return ['History sync diagnostics', `From: ${accountLabel(view, view.source, 'Unconfirmed')} | ${view.source}`,
+    `To: ${accountLabel(view, view.target)} | ${view.target}`, mode(view), view.status,
+    ...(view.error ? [`Error: ${view.error}`] : []), `Config: ${view.configPath || '(default)'}`,
+    profilesText(view), ...(view.preview ? [previewText(view)] : []),
+    ...(view.backup ? [`Latest backup: ${view.backup}`] : []),
+  ].join('\n');
+}
+
+function renderPreviewTable({Box,Text,Button,Select,Input}, controller, copy) {
+  const v=controller.view;
+  const filtered=filteredPreviewRows(v);
+  const pageCount=Math.max(1,Math.ceil(filtered.length/15));
+  const page=Math.min(v.previewPage,pageCount-1);
+  const pageRows=filtered.slice(page*15,(page+1)*15);
+  const selected=v.previewRows.find(r=>r.File===v.selectedPreview);
+  const widths=['36%','23%','23%','18%'];
+  const cell=(content,index)=>Box({width:widths[index],flexShrink:0,flexDirection:'column',paddingX:1,children:content});
+  const stateCell=(state,row)=>[Text({bold:true,children:archiveState(state)}),
+    ...(state && state.Title!==row.Title ? [Text({dimColor:true,children:state.Title.slice(0,1000)})] : [])];
+  const filters=Box({flexDirection:'row',flexWrap:'wrap',gap:1,children:['all','active','archived'].map(key=>Button({
+    key:`filter-${key}`,label:`${v.previewFilter===key?'› ':''}${{all:'All',active:'Active',archived:'Archived'}[key]}`,
+    dimColor:v.previewFilter!==key,onPress:()=>controller.filterPreview(key),
+  }))});
+  const search=Input ? [Input({key:'preview-search',label:'Search titles',placeholder:'Session title…',value:v.previewSearch,
+    onInput:value=>controller.searchPreview(value),onSubmit:value=>controller.searchPreview(value)})] : [];
+  return [
+    Text({bold:true,children:'Destination before → after'}),
+    Text({dimColor:true,children:'Active and Archived filter the planned destination state. All also includes sessions left absent. Titles come from the source when available.'}),
+    filters,
+    Select({key:'preview-changes',label:'Changes',value:v.previewChanges,
+      options:[{value:'all',label:'All sessions'},{value:'changes',label:'Additions and updates'},{value:'issues',label:'Conflicts and skipped'}],
+      onSelect:value=>controller.filterPreviewChanges(value)}),
+    ...search,
+    copy('copy-filtered','Copy filtered table',()=>previewTableText(filtered)),
+    Text({dimColor:true,children:`${filtered.length} of ${v.previewRows.length} sessions · page ${page+1} of ${pageCount}`}),
+    ...(v.preview.rowsTruncated ? [Text({dimColor:true,children:`Comparison contains the first ${v.previewRows.length} of ${v.preview.rowsTotal} sessions.`})] : []),
+    Box({flexDirection:'column',borderStyle:'single',children:[
+      Box({flexDirection:'row',children:['Session','Before','After','Change'].map((label,i)=>cell([Text({bold:true,children:label})],i))}),
+      ...pageRows.map(r=>Box({key:`preview-row-${r.File}`,flexDirection:'row',paddingY:1,children:[
+        cell([Text({children:r.Title.slice(0,1000)})],0),cell(stateCell(r.Before,r),1),cell(stateCell(r.After,r),2),
+        cell([Text({children:r.Action}),Button({key:`details-${r.File}`,label:'Details',onPress:()=>controller.selectPreview(r.File)})],3),
+      ]})),
+      ...(!pageRows.length?[Text({dimColor:true,children:'No sessions match these filters.'})]:[]),
+    ]}),
+    Box({flexDirection:'row',gap:1,children:[
+      Button({key:'preview-prev',label:'Previous',dimColor:page===0,onPress:()=>{if(page>0)controller.pagePreview(page-1);}}),
+      Button({key:'preview-next',label:'Next',dimColor:page>=pageCount-1,onPress:()=>{if(page<pageCount-1)controller.pagePreview(page+1);}}),
+    ]}),
+    ...(selected?[
+      Text({bold:true,children:selected.Title.slice(0,1000)}),
+      Text({children:`${selected.Action}: ${selected.Detail}`}),
+      Text({children:`Before: ${selected.Before?.Title||'Not present'} · ${archiveState(selected.Before)}\nAfter: ${selected.After?.Title||'Not present'} · ${archiveState(selected.After)}`}),
+      Text({dimColor:true,children:`Changed fields: ${selected.ChangedFields?.join(', ')||'None'}\nSession file: ${selected.File}`}),
+    ]:[]),
+  ];
+}
+
+function renderPane({ Box, Text, Button, Select, Input }, controller, writer = async () => ({isCopied:false,reason:'no-clipboard'})) {
+  const v = controller.view;
+  const row = children => Box({ flexDirection: 'row', flexWrap: 'wrap', gap: 1, children });
+  const heading = text => Text({ bold: true, children: text });
+  const note = text => Text({ dimColor: true, children: text });
+  const go = section => controller.showSection(section);
+  const copy = (key, label, getText) => Button({key, label, onPress: press => controller.copyText(getText(), writer, press?.surface)});
+  const section = v.section || 'accounts';
+  let content;
+  if (section === 'accounts') {
+    const sourceChoices = v.profiles.filter(p => !v.sourceCandidates.length || v.sourceCandidates.includes(p.Id));
+    content = [
+      heading('Accounts'),
+      Text({ children: `From · ${accountLabel(v, v.source, 'Confirm the account open in Claude')}` }),
+      ...(v.source ? [note('This session’s account is the source.')] : [
+        Text({ children: v.status }),
+        Select({ key: 'source-confirmation', label: 'Account open now', value: '',
+          options: [{ value: '', label: 'Choose the open account…' }, ...sourceChoices.map(p => ({ value: p.Id, label: accountLabel(v, p.Id) }))],
+          onSelect: async value => { await controller.reopen(); if (!v.busy && value) await controller.choose(value, v.target === value ? '' : v.target); } }),
+      ]),
+      Select({ key: 'target', label: 'To · inactive account', value: v.target,
+        options: [{ value: '', label: 'Choose destination…' }, ...v.profiles.filter(p => p.Id !== v.source).map(p => ({
+          value: p.Id, label: `${accountLabel(v, p.Id)} · ${p.Sessions} sessions`,
+        }))],
+        onSelect: async value => { await controller.reopen(); if (!v.busy) await controller.choose(v.source, value); } }),
+      note('Copy saved Code history from this account into the destination. Keep the destination account inactive.'),
+      copy('copy-profiles', 'Copy profile list', () => profilesText(v)),
+      row([action(Button, controller, 'refresh', 'Refresh accounts', () => controller.refresh()),
+        action(Button, controller, 'continue', 'Continue to Sync', () => go('sync'), true)]),
+      heading('Prompt controls'),
+      Select({ key: 'prompt-display', label: 'Show near the prompt', value: v.promptDisplay,
+        options: [{ value: 'launcher', label: 'Menu button only' }, { value: 'compact', label: 'Status and quick controls' },
+          { value: 'hidden', label: 'Hide — open with /history-sync' }],
+        onSelect: value => controller.choosePromptDisplay(value) }),
+      Select({ key: 'launcher-placement', label: 'Launcher placement', value: v.launcherPlacement,
+        options: [{ value: 'all', label: 'Compare all three locations' }, { value: 'band', label: 'Above the prompt' },
+          { value: 'mode', label: 'Session mode area' }, { value: 'hint', label: 'Prompt hint area' }],
+        onSelect: value => controller.chooseLauncherPlacement(value) }),
+      note('Compare shows Prompt, Mode, and Hint labels. A location appears only if this Desktop build asks the mod to draw it. /history-sync always opens the pane.'),
+      note('This launcher appears in the main conversation only. Claude decides where the settings pane opens.'),
+    ];
+  } else if (section === 'sync') {
+    content = [
+      heading('Sync'),
+      Text({ children: `${accountLabel(v, v.source, 'Confirm this account')} → ${accountLabel(v, v.target)}` }),
+      ...(!v.source || !v.target ? [note('Choose accounts before previewing or syncing.'),
+        Button({ key: 'choose-accounts', label: 'Choose accounts', onPress: () => go('accounts') })] : []),
+      row([action(Button, controller, 'preview', 'Preview', () => controller.preview(), true),
+        action(Button, controller, 'sync', 'Sync now', () => controller.sync(), true)]),
+      heading('Automatic sync'),
+      Text({ children: mode(v) }),
+      note('Checks saved history every 30 seconds and shortly after a turn finishes. Starts paused in each session.'),
+      row([automatic(Button, controller)]),
+      note('Pause before switching accounts. Changing the destination pauses automatic sync.'),
+      heading('Results'),
+      Text({ children: v.status }),
+      ...(samePair(v, v.lastResult) ? [Text({ children: `${v.lastResult.message}\nLast sync: ${time(v.lastResult.at, true)}` })] : [note('No completed sync for this direction yet.')]),
+      ...(v.preview ? [Text({ children: v.preview.message }),
+        copy('copy-preview', 'Copy preview', () => previewText(v)),
+        ...(v.preview.reportTruncated ? [note(`Showing ${v.report.length} of ${v.preview.reportTotal} report entries.`)] : []),
+        ...(v.previewRows.length ? renderPreviewTable({Box,Text,Button,Select,Input},controller,copy) :
+          v.report.length ? [Text({children:v.report.map(r=>`${r.Action}: ${r.File}\n${r.Detail}`).join('\n').slice(0,9500)})] : [note('No sessions in this preview.')])] : []),
+    ];
+  } else {
+    content = [
+      heading('Backups'),
+      note('Each modifying sync backs up the destination cards and archive index. Recent backups include their original direction.'),
+      ...(v.receipts.length ? v.receipts.flatMap((r, index) => [
+        heading(`${index === 0 ? 'Latest backup' : 'Backup'} · ${r.status === 'prepared' ? 'Interrupted — inspect before retrying' : 'Complete'}`),
+        Text({ children: `${accountLabel(v, r.source)} → ${accountLabel(v, r.target)}\n${time(r.at, true)}\n${r.message}` }),
+        Text({ children: r.backup }),
+        copy(`copy-backup-${index}`, 'Copy backup path', () => r.backup),
+      ]) : [note('No backup recorded yet. A preview or sync with no changes creates no backup.')]),
+      heading('Restore'),
+      note('Fully exit Claude before restoring a backup with the standalone Undo command. Review the restore with -WhatIf first.'),
+    ];
+  }
+  return Box({ flexDirection: 'column', gap: 1, padding: 1, children: [
+    heading('History sync'),
+    copy('copy-diagnostics', 'Copy diagnostics', () => diagnosticsText(v)),
+    row(['accounts', 'sync', 'backups'].map((key, i) => Button({ key: `nav-${key}`,
+      label: `${section === key ? '› ' : ''}${['Accounts', 'Sync', 'Backups'][i]}`, hotkey: ['a', 's', 'b'][i],
+      dimColor: section !== key, onPress: () => go(key) }))),
+    ...content,
+    ...(v.error ? [Text({ color: 'red', children: v.error })] : []),
+    ...(v.notice ? [note(v.notice)] : []),
+    ...(v.copyStatus ? [note(v.copyStatus)] : []),
+  ] });
+}
+
+
+const A = '11111111-1111-4111-8111-111111111111\\22222222-2222-4222-8222-222222222222';
+const B = '33333333-3333-4333-8333-333333333333\\44444444-4444-4444-8444-444444444444';
+const profiles = [
+  {Id:A, Email:'current@example.test', OrganizationId:A.split('\\')[1], Sessions:12},
+  {Id:B, Email:'other@example.test', OrganizationId:B.split('\\')[1], Sessions:4},
+];
+let c, paneOpen = false, copies = 0, interrupted = false, ambiguous = false;
+const saved = new Map([['destination', B]]), log = [];
+const noopTimer = () => ({cancel(){}});
+const adapter = {
+  root:'Fixture only', windows:true, sessionId:async()=> 'preview', envGet:async()=> '',
+  now:async()=>Date.now(), storeGet:async key=>saved.get(key), storeSet:async(key,value)=>saved.set(key,value),
+  redraw:()=>queueMicrotask(draw), log:()=>{}, every:noopTimer, after:noopTimer,
+  processRun:async argv=> {
+    const action = argv[argv.indexOf('-Action')+1];
+    log.unshift(action); draw();
+    await new Promise(resolve=>setTimeout(resolve, 350));
+    const result = {Ok:true, Action:action};
+    if(action==='Profiles') Object.assign(result,{Profiles:profiles, CurrentProfile:ambiguous?'':A, SessionProfiles:ambiguous?[A,B]:[A]});
+    if(action==='Plan') Object.assign(result,{Additions:1, Updates:1, Conflicts:1,Skipped:1,Report:[],Rows:[
+      {File:'local_fixture.json',Title:'New project ideas',Action:'Add',Before:null,After:{Title:'New project ideas',Archived:false},Detail:'Saved session card'},
+      {File:'local_archive.json',Title:'Release planning',Action:'Update',Before:{Title:'Old release plan',Archived:false},After:{Title:'Release planning',Archived:true},Detail:'Rename and archive',ChangedFields:['title','isArchived']},
+      {File:'local_conflict.json',Title:'Account configuration',Action:'Conflict',Before:{Title:'Existing account setup',Archived:false},After:{Title:'Existing account setup',Archived:false},Detail:'CLI identities differ'},
+      {File:'local_pending.json',Title:'Unfinished startup',Action:'Skipped',Before:null,After:null,Detail:'CLI session has not started'},
+      {File:'local_matching.json',Title:'Documentation review',Action:'Unchanged',Before:{Title:'Documentation review',Archived:true},After:{Title:'Documentation review',Archived:true},Detail:'Already matches'},
+    ]});
+    if(action==='Sync') {
+      copies++;
+      Object.assign(result,{Additions:1, Updates:1, Backup:'C:/FixtureBackups/receipt-'+copies});
+      if(interrupted) Object.assign(result,{Ok:false, Error:'Simulated destination file change. Automatic sync paused.'});
+    }
+    return {exitCode:result.Ok?0:1, stderr:'', stdout:JSON.stringify(result)};
+  },
+};
+const element = type=>props=>({type,props});
+const constructors = Object.fromEntries(['Box','Text','Button','Select','Input'].map(type=>[type,element(type)]));
+function dom(tree) {
+  if(tree==null) return document.createTextNode('');
+  if(typeof tree!=='object') return document.createTextNode(String(tree));
+  const p=tree.props;
+  const el=document.createElement(tree.type==='Button'?'button':['Select','Input'].includes(tree.type)?'label':'div');
+  if(tree.type==='Box') {
+    el.className='box'; el.style.flexDirection=p.flexDirection||'row';
+    el.style.flexWrap=p.flexWrap||'nowrap'; el.style.gap=(p.gap||0)*8+'px';
+    if(p.padding) el.style.padding=p.padding*8+'px';
+    if(p.width)el.style.width=typeof p.width==='number'?p.width*8+'px':p.width;
+    if(p.flexShrink!==undefined)el.style.flexShrink=p.flexShrink;
+    if(p.paddingX)el.style.paddingInline=p.paddingX*8+'px';
+    if(p.paddingY)el.style.paddingBlock=p.paddingY*8+'px';
+    if(p.borderStyle)el.style.border='1px solid #d6d3ca';
+    for(const child of [p.children||[]].flat()) el.append(dom(child));
+  } else if(tree.type==='Text') {
+    el.textContent=p.children; el.className='text';
+    if(p.bold) el.style.fontWeight='650';
+    if(p.dimColor) el.classList.add('muted');
+    if(p.color==='red') el.classList.add('error');
+  } else if(tree.type==='Button') {
+    el.textContent=p.label; if(p.dimColor) el.classList.add('muted');
+    el.onclick=async()=>{try{await p.onPress();}catch(error){document.querySelector('#preview-error').textContent=error.message;} draw();};
+  } else if(tree.type==='Input') {
+    el.textContent=p.label;el.className='picker';
+    const input=document.createElement('input');input.value=p.value||'';input.placeholder=p.placeholder||'';input.dataset.key=p.key;
+    input.oninput=()=>p.onInput?.(input.value);input.onkeydown=event=>{if(event.key==='Enter')p.onSubmit(input.value);};el.append(input);
+  } else {
+    el.textContent=p.label; el.className='picker';
+    const select=document.createElement('select');
+    for(const option of p.options) {const node=document.createElement('option');node.value=option.value;node.textContent=option.label;select.append(node);}
+    select.value=p.value; select.onchange=async()=>{await p.onSelect(select.value);draw();}; el.append(select);
+  }
+  return el;
+}
+async function openSettings(){if(!c.view.source||!c.view.target)c.showSection('accounts');paneOpen=true;draw();await c.refresh();}
+async function copyPreview(text){
+  const output=document.querySelector('#copy-output');output.hidden=false;output.value=text;
+  if(navigator.clipboard?.writeText){try{await navigator.clipboard.writeText(text);return{isCopied:true};}catch{}}
+  return{isCopied:false,reason:'use the selectable text box below'};
+}
+function draw(){
+  if(!c)return;
+  const focused=document.activeElement?.dataset?.key;
+  const caret=focused?document.activeElement.selectionStart:null;
+  document.querySelector('#band').replaceChildren(...(launcherVisible(c.view,'band')?[dom(renderBand(constructors,c,openSettings))]:[]));
+  document.querySelector('#mode').replaceChildren(...(launcherVisible(c.view,'mode')?[dom(renderLauncher(constructors,c,openSettings,'mode'))]:[]));
+  document.querySelector('#hint').replaceChildren(...(launcherVisible(c.view,'hint')?[dom(renderLauncher(constructors,c,openSettings,'hint'))]:[]));
+  document.querySelector('#menu').hidden=!paneOpen;
+  if(paneOpen)document.querySelector('#pane').replaceChildren(dom(renderPane(constructors,c,copyPreview)));
+  if(focused){const replacement=document.querySelector('#pane input[data-key="'+focused+'"]');if(replacement){replacement.focus();replacement.setSelectionRange(caret,caret);}}
+  document.querySelector('#operations').textContent=log.slice(0,8).join(' · ')||'None';
+}
+document.querySelector('#close').onclick=()=>{paneOpen=false;draw();};
+document.addEventListener('keydown',event=>{if(event.key==='Escape'){paneOpen=false;draw();}});
+document.querySelector('#failure').onchange=event=>{interrupted=event.target.checked;};
+document.querySelector('#ambiguous').onchange=async event=>{ambiguous=event.target.checked;c.stop();await c.reopen();draw();};
+document.querySelector('#reload').onclick=async()=>{c.stop();await c.reopen();draw();};
+document.querySelector('#remove-dom').onclick=()=>{globalThis.__historySyncDomLaunchers?.dispose();delete globalThis.__historySyncDomLaunchers;};
+c=createController(); await c.initialize(adapter); draw();
+
+/* Standalone DOM launcher experiment; also follows claude-ui-mod's renderer contract.
+ * Only activates an existing official History sync button. No credentials, IPC,
+ * account files, prompt edits, or second sync controller are involved.
+ */
+(function () {
+  'use strict';
+  function mountHistorySyncDom(doc, options = {}) {
+    const win = doc.defaultView;
+    const storage = options.storage || win.localStorage;
+    const preferenceKey = 'claude-history-sync:dom-placement:v1';
+    const placements = ['all', 'sidebar', 'header', 'floating'];
+    let placement = 'all', disposed = false, queued = false, menuOpen = false;
+    try { const saved = storage.getItem(preferenceKey); if (placements.includes(saved)) placement = saved; } catch {}
+    const hosts = new Map();
+    const cleanup = [];
+    const css = `
+      :host {color-scheme:light dark;font:13px/1.45 system-ui,sans-serif;color:var(--text-100,#ecece8)}
+      * {box-sizing:border-box} button,select {font:inherit;color:inherit;border:1px solid var(--border-300,#666);
+        border-radius:7px;background:var(--bg-100,#272727);padding:6px 10px;cursor:pointer}
+      button:hover {background:var(--bg-200,#383838)} button:focus-visible,select:focus-visible {outline:2px solid #d99b77;outline-offset:2px}
+      button:disabled {opacity:.55;cursor:default} .row {display:flex;gap:6px;align-items:center}
+      .menu {width:260px;padding:14px;background:var(--bg-100,#272727);border:1px solid var(--border-300,#666);
+        border-radius:10px;box-shadow:0 8px 28px #0004;display:flex;flex-direction:column;gap:12px}
+      .menu[hidden]{display:none} .muted {opacity:.75;font-size:12px} label{display:flex;flex-direction:column;gap:5px}
+      .title {font-weight:650} .sidebar {width:100%;text-align:left} .floating {box-shadow:0 4px 16px #0004}
+    `;
+    function host(name) {
+      const node = doc.createElement('div');
+      node.dataset.historySyncDom = name;
+      const root = node.attachShadow({mode:'open'});
+      const style = doc.createElement('style'); style.textContent = css; root.append(style);
+      hosts.set(name, {node, root}); return hosts.get(name);
+    }
+    function button(root, key, label, handler, className = '') {
+      const node = doc.createElement('button'); node.type = 'button'; node.dataset.key = key;
+      node.textContent = label; node.className = className;
+      node.addEventListener('click', handler); root.append(node); return node;
+    }
+    function nativeButton() {
+      // querySelectorAll does not cross our shadow roots, and explicit exclusion
+      // protects against recursion if the host's DOM representation changes.
+      return [...doc.querySelectorAll('button,[role="button"]')].find(node =>
+        !node.closest('[data-history-sync-dom]') && /^History sync(?:$|\s*·)/.test(node.textContent.trim()) &&
+        !node.disabled && node.getAttribute('aria-disabled') !== 'true');
+    }
+    function open() {
+      const target = nativeButton();
+      if (!target) { status.textContent = 'Open a Code session with an official History sync launcher enabled.'; showMenu(true); return false; }
+      showMenu(false); target.click(); return true;
+    }
+    const sidebar = host('sidebar');
+    const sidebarButton = button(sidebar.root, 'open-sidebar', 'History sync · Sidebar', event => event.altKey ? showMenu(true) : open(), 'sidebar');
+    const header = host('header');
+    const headerButton = button(header.root, 'menu-header', 'History sync · Menu', () => showMenu(!menuOpen));
+    headerButton.setAttribute('aria-expanded', 'false');
+    const floating = host('floating');
+    const floatingRow = doc.createElement('div'); floatingRow.className = 'row'; floating.root.append(floatingRow);
+    const floatingButton = button(floatingRow, 'open-floating', 'History sync · Floating', open, 'floating');
+    const optionsButton = button(floatingRow, 'options', '⋯', () => showMenu(!menuOpen));
+    optionsButton.setAttribute('aria-label', 'Choose history sync DOM launcher placement');
+    const menu = host('menu');
+    const panel = doc.createElement('section'); panel.className = 'menu'; panel.hidden = true;
+    panel.setAttribute('aria-label', 'History sync launcher menu'); menu.root.append(panel);
+    const title = doc.createElement('div'); title.className = 'title'; title.textContent = 'History sync · DOM launchers'; panel.append(title);
+    const status = doc.createElement('div'); status.className = 'muted'; panel.append(status);
+    const openButton = button(panel, 'open-menu', 'Open sync settings', open);
+    const label = doc.createElement('label'); label.textContent = 'Show launchers'; panel.append(label);
+    const select = doc.createElement('select'); select.dataset.key = 'placement';
+    for (const [value, text] of [['all','Compare all three'],['sidebar','Sidebar entry'],['header','Header menu'],['floating','Floating button']]) {
+      const option = doc.createElement('option'); option.value = value; option.textContent = text; select.append(option);
+    }
+    select.value = placement; label.append(select);
+    select.addEventListener('change', () => { placement = select.value; try {storage.setItem(preferenceKey,placement);} catch {} refresh(); });
+    const evidence = doc.createElement('div'); evidence.className = 'muted'; panel.append(evidence);
+    button(panel, 'close', 'Close menu', () => showMenu(false));
+    function showMenu(value) {
+      menuOpen = value; panel.hidden = !value; headerButton.setAttribute('aria-expanded', String(value));
+      if (value) select.focus();
+    }
+    function refresh() {
+      if (disposed || !doc.body) return;
+      const sidebarAnchor = doc.querySelector('[data-testid="sidebar"],aside,[role="navigation"][aria-label*="Sidebar" i],nav[aria-label*="Sidebar" i]');
+      const headerAnchor = doc.querySelector('header,[role="banner"]');
+      const sidebarParent = sidebarAnchor || doc.body;
+      const headerParent = headerAnchor || doc.body;
+      if (sidebar.node.parentNode !== sidebarParent) sidebarParent.append(sidebar.node);
+      if (header.node.parentNode !== headerParent) headerParent.append(header.node);
+      if (!floating.node.isConnected) doc.body.append(floating.node);
+      if (!menu.node.isConnected) doc.body.append(menu.node);
+      sidebar.node.style.cssText = sidebarAnchor ? 'display:block;margin:8px;' : 'position:fixed;left:12px;top:40%;z-index:2147483000;';
+      header.node.style.cssText = headerAnchor ? 'display:inline-block;margin:4px 8px;' : 'position:fixed;right:20px;top:64px;z-index:2147483000;';
+      floating.node.style.cssText = 'position:fixed;right:20px;bottom:24px;z-index:2147483000;';
+      menu.node.style.cssText = 'position:fixed;right:20px;top:108px;z-index:2147483001;';
+      for (const [name, entry] of hosts) if (name !== 'menu') entry.node.hidden = placement !== 'all' && placement !== name;
+      const ready = Boolean(nativeButton());
+      for (const item of [sidebarButton, floatingButton, openButton]) item.disabled = !ready;
+      status.textContent = ready ? 'Opens the existing official sync pane. Copies still require its controls.' : 'Waiting for a Code session with a visible official History sync launcher.';
+      evidence.textContent = `Sidebar: ${sidebarAnchor ? 'attached to app sidebar' : 'left-edge fallback'}. Menu: ${headerAnchor ? 'attached to app header' : 'top-edge fallback'}. Alt-click Sidebar to choose placement.`;
+    }
+    function schedule() {
+      if (queued || disposed) return; queued = true;
+      win.queueMicrotask(() => { queued = false; refresh(); });
+    }
+    const observer = new win.MutationObserver(schedule);
+    observer.observe(doc.documentElement, {subtree:true, childList:true, characterData:true});
+    cleanup.push(() => observer.disconnect());
+    const onKey = event => { if (event.key === 'Escape' && menuOpen) {showMenu(false);headerButton.focus();} };
+    doc.addEventListener('keydown', onKey); cleanup.push(() => doc.removeEventListener('keydown',onKey));
+    refresh();
+    const api = {
+      refresh, open,
+      setPlacement(value) { if (!placements.includes(value)) return; placement=value;select.value=value;try{storage.setItem(preferenceKey,value);}catch{}refresh(); },
+      snapshot() {return {placement,ready:Boolean(nativeButton()),sidebarAttached:sidebar.node.parentNode !== doc.body,headerAttached:header.node.parentNode !== doc.body};},
+      dispose() { if(disposed)return;disposed=true;for(const fn of cleanup)fn();for(const item of hosts.values())item.node.remove(); },
+    };
+    return api;
+  }
+  if (typeof module === 'object' && module.exports) module.exports = {mountHistorySyncDom};
+  else {
+    globalThis.__historySyncDomLaunchers?.dispose();
+    const mounted = mountHistorySyncDom(document);
+    globalThis.__historySyncDomLaunchers = mounted;
+    if (typeof ctx === 'object' && typeof ctx.onDispose === 'function') ctx.onDispose(() => {
+      mounted.dispose();
+      if (globalThis.__historySyncDomLaunchers === mounted) delete globalThis.__historySyncDomLaunchers;
+    });
+  }
+})();
+</script></html>

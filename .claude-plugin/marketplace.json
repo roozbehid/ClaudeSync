@@ -1,0 +1,13 @@
+{
+  "name": "account-history-tools",
+  "metadata": { "description": "Local account history tools for Claude Code on Windows." },
+  "owner": { "name": "ClaudeSync" },
+  "plugins": [
+    {
+      "name": "account-history-sync",
+      "source": "./mods/account-history-sync",
+      "description": "One-way local account history sync inside Claude Code.",
+      "version": "0.5.1"
+    }
+  ]
+}
