@@ -1,0 +1,6 @@
+{
+  "name": "account-history-sync",
+  "version": "0.5.1",
+  "description": "Keep local Desktop Code history in sync with an inactive account.",
+  "author": { "name": "ClaudeSync" }
+}
