@@ -15,6 +15,7 @@
 /claude-history-backup-*/
 **/state/
 **/mod-control/
+**/mod-previews/
 **/backups/
 **/*.jsonl
 **/*.log

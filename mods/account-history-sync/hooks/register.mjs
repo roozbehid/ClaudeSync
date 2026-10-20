@@ -11,6 +11,7 @@ export function register(on) {
       root: $.plugin.root,
       windows: (await $.env.get('OS')) === 'Windows_NT',
       processRun: (argv, options) => $.process.run(argv, options),
+      readText: path => $.fs.read(path),
       redraw: () => $.ui.invalidate('ui.render'),
       log: text => $.ui.log(text),
       now: () => $.clock.now(),

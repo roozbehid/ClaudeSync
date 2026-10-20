@@ -73,6 +73,8 @@ for (const surface of ['terminal','desktop'] as const) {
     const a='11111111-1111-4111-8111-111111111111\\22222222-2222-4222-8222-222222222222';
     const b='33333333-3333-4333-8333-333333333333\\44444444-4444-4444-8444-444444444444';
     const actions:string[]=[];const copies:string[]=[];
+    let previewFile='';const reads:string[]=[];
+    on('fs.read',($,e)=>{reads.push(e.path);return{value:previewFile};});
     on('session.id',()=>({value:'test-owner'}));on('command.register',()=>({value:undefined}));
     on('ui.copy',($,e)=>{copies.push(e.text);return{value:{isCopied:true}};});
     on('ui.render',($,e)=>{const {Text}=$.ui.resolve(e);return Text({children:''});});
@@ -80,10 +82,15 @@ for (const surface of ['terminal','desktop'] as const) {
     on('process.run',($,e)=>{
       const action=e.argv[e.argv.indexOf('-Action')+1];actions.push(action);
       const result=action==='Profiles'?{Ok:true,Profiles:[{Id:a,Email:'source@example.test',Sessions:3},{Id:b,Email:'destination@example.test',Sessions:1}],CurrentProfile:a,SessionProfiles:[a]}:
-        action==='Plan'?{Ok:true,Action:'Plan',Additions:1,Updates:1,Rows:[
+        action==='Plan'?{Ok:true,Action:'Plan',Additions:1,Updates:1,Report:[],Rows:[
           {File:'local_add.json',Title:'New active work',Action:'Add',Before:null,After:{Title:'New active work',Archived:false}},
           {File:'local_update.json',Title:'Renamed work',Action:'Update',Before:{Title:'Old name',Archived:false},After:{Title:'Renamed work',Archived:true},ChangedFields:['title','isArchived']},
         ]}:{Ok:true};
+      if(action==='Plan'&&surface==='desktop'){
+        expect(e.argv.includes('-PreviewFile')).toBe(true);
+        previewFile=JSON.stringify(result);
+        return{value:{exitCode:0,stdout:JSON.stringify({Ok:true,Action:'Plan',PreviewPath:'C:/private/preview.json',PreviewBytes:previewFile.length}),stderr:'',isStdoutTruncated:false,isStderrTruncated:false}};
+      }
       return{value:{exitCode:0,stdout:JSON.stringify(result),stderr:'',isStdoutTruncated:false,isStderrTruncated:false}};
     });
     await $.session.start({cwd:'C:/fixture',surface,isInteractive:true});
@@ -102,5 +109,6 @@ for (const surface of ['terminal','desktop'] as const) {
     await pane.press({key:'details-local_update.json'});
     expect(await pane.find({type:'Text',text:'Session file: local_update.json'})).toBeDefined();
     expect(actions.includes('Sync')).toBe(false);expect(actions.includes('Arm')).toBe(false);
+    if(surface==='desktop')expect(reads).toHaveLength(1);
   });
 }

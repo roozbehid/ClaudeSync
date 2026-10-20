@@ -139,4 +139,25 @@ $result = Call-Bridge Sync one $sourceId $targetId $false $fixtureBridge
 Check (-not $result.Ok -and $result.Error -like '*Fixture interrupted*' -and $result.Backup) 'Interrupted sync returns a retained prepared backup path'
 $receipt = [IO.File]::ReadAllText((Join-Path $result.Backup 'manifest.json')) | ConvertFrom-Json
 Check ($receipt.Status -eq 'prepared') 'Interrupted backup is recoverable and never marked complete'
+
+# Large, real JSON responses must cross the same file transport used by the mod.
+# Long titles exercise the byte limit independently of the 1,000-row cap.
+foreach ($number in 1..10) {
+    $largeId = 'dddddddd-dddd-4ddd-8ddd-{0:d12}' -f $number
+    Add-FixtureCard $sourceId $largeId ('Preview fixture ' + ('x' * 200000)) $false | Out-Null
+}
+$largeSourceHash = Get-CHFileHash $sourceCard
+$largeTargetHash = Get-CHFileHash $targetCard
+$previewOutput = @(& $engine -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $bridgeScript -Action Plan -ConfigPath $fixtureConfig -SourceProfile $sourceId -TargetProfile $targetId -SessionId $sessionId -PreviewFile)
+$previewCode = $LASTEXITCODE
+$previewManifestText = $previewOutput -join "`n"
+$previewManifest = $previewManifestText | ConvertFrom-Json
+Check ($previewCode -eq 0 -and $previewManifest.Ok -and $previewManifest.Action -eq 'Plan') 'Large preview returns a successful file manifest'
+Check ($previewManifestText.Length -lt 2048) 'Large preview stdout stays small enough for process capture'
+$previewBytes = [IO.File]::ReadAllBytes($previewManifest.PreviewPath)
+Check ($previewBytes.Length -eq $previewManifest.PreviewBytes -and $previewBytes.Length -le 4194304) 'Preview file respects the host fs.read byte limit'
+$largePreview = [Text.Encoding]::UTF8.GetString($previewBytes) | ConvertFrom-Json
+Check ($largePreview.Ok -and $largePreview.RowsTotal -gt $largePreview.Rows.Count -and $largePreview.RowsTruncated) 'Byte-limited preview remains complete JSON and explicitly reports omitted rows'
+Check ($largePreview.ReportTruncated -eq ($largePreview.Report.Count -lt $largePreview.ReportTotal)) 'Byte-limited report reports its actual coverage'
+Check ((Get-CHFileHash $sourceCard) -eq $largeSourceHash -and (Get-CHFileHash $targetCard) -eq $largeTargetHash) 'File-transport preview never changes source or target history'
 Write-Output "PASS: $testCount assertions. Fixtures: $testDirectory"

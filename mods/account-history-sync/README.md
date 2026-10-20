@@ -207,11 +207,27 @@ after a crashed or ended session, its lease expires within three minutes.
 ## Configuration and recovery
 
 The helper initializes `%LOCALAPPDATA%\ClaudeHistorySync\profiles.json` with
-automatic Desktop-root discovery. If discovery cannot choose a root, set
-`SessionsRoot` to the absolute history directory in that config, after checking
-which directory the running Desktop uses. Save a config backup before changing it.
-For this Store installation, that root was verified under
-`%LOCALAPPDATA%\Packages\Claude_pzs8sxrjxfjjc\LocalCache\Roaming\Claude\claude-code-sessions`.
+`SessionsRoot: "Auto"`. Discovery first reads the running Desktop's
+`--user-data-dir` argument in the current Windows session, following relocated
+data directories without pinning a username, app version, or Store publisher ID.
+When Desktop is closed or process inspection is unavailable, it checks regular,
+Store, and `Claude-Data` installations under the current user's application-data
+directories. Duplicate process paths are collapsed. Multiple candidates produce
+an error listing the paths; discovery never chooses by modification time.
+
+If an older config pins a directory that has moved, back up that config and change
+`SessionsRoot` to `"Auto"`. Explicit custom paths are still honored and are never
+silently replaced. If discovery cannot find a root, open Desktop and a Code session
+and refresh accounts. For an ambiguous installation, set an explicit absolute
+history path after checking which directory Desktop uses.
+Large previews are transferred through a private snapshot file instead of process
+stdout, which Claude can truncate. Each session overwrites its own snapshot under
+`mod-previews` beside the config. The file is limited to the host's 4 MiB read
+limit; omitted rows and report entries are explicitly marked as truncated.
+These snapshots contain history titles and should stay private.
+
+Automatic discovery handles data-root moves while the `claude-code-sessions`
+layout remains compatible; an upstream history-format change may require an update.
 Discovery creates that private config but
 does not edit history. Put `profile-labels.json` alongside it for manual email
 labels. Settings, state, and backups live outside the plugin install/cache folder.
@@ -223,6 +239,13 @@ when it is in the destination. Incorrect nonempty CLI IDs, filename/session-ID
 mismatches, missing working directories, malformed JSON, and invalid archive flags
 still stop the plan. Preview returns up to 1,000 report entries and explicitly
 reports truncation beyond that limit.
+
+Sync preserves local parent/side-session links, fork origins and fork-point
+messages, and explicit detachment. Existing copies missing this metadata are
+repaired on the next sync even when their titles match. Preview details show
+the parent before and after. Children with unavailable or mismatched ancestors,
+deletion-marked parents, or cyclic lineage are skipped with a reason; the tool
+does not resurrect a missing parent. Cloud task ownership remains account-specific.
 
 For custom roots or existing labels, set `ACCOUNT_HISTORY_SYNC_CONFIG` to the full
 path of a `profiles.json` before starting Claude, or through Claude's environment
@@ -256,6 +279,7 @@ credentials, or transcripts. See the repository README for eligibility and polic
 
 ```powershell
 node --test .\mods\account-history-sync\tests\controller.test.mjs
+.\Test-SessionsDiscovery.ps1
 .\Test-ModBridge.ps1
 claude plugin test .\mods\account-history-sync
 ```

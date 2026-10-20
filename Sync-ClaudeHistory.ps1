@@ -23,13 +23,14 @@ param(
 $ErrorActionPreference = 'Stop'
 if (-not $ConfigPath) { $ConfigPath = Join-Path $PSScriptRoot 'profiles.json' }
 $script:GuidPattern = '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
+$script:LineageFields = @('spawnedFrom', 'forkedFromSessionId', 'forkedAtMessageUuid', 'lineageDetached')
 $script:HistoryFields = @('title', 'titleSource', 'isArchived', 'lastActivityAt',
     'completedTurns', 'titleTurn', 'postTurnSummary', 'postTurnSummaryFor',
-    'lastAssistantUuid', 'model', 'effort', 'branch', 'sourceBranch', 'writtenBranches')
+    'lastAssistantUuid', 'model', 'effort', 'branch', 'sourceBranch', 'writtenBranches') + $script:LineageFields
 $script:IdentityFields = @('sessionId', 'cliSessionId', 'cwd', 'originCwd', 'wslConfig', 'sshConfig', 'sshRemoteTranscriptPath')
 $script:CloneFields = $script:IdentityFields + $script:HistoryFields + @(
     'createdAt', 'lastFocusedAt', 'worktreePath', 'worktreeName', 'gitAnchors',
-    'priorCliSessionIds', 'forkedFromSessionId', 'sshRemoteProcessId')
+    'priorCliSessionIds', 'sshRemoteProcessId')
 
 function Get-CHHash([byte[]]$Bytes) {
     $sha = [Security.Cryptography.SHA256]::Create()
@@ -155,19 +156,67 @@ function Get-CHEmails([string]$LabelsPath) {
     }
     $emails
 }
-function Find-CHSessionsRoot {
-    $candidates = @()
-    $regular = Join-Path $env:APPDATA 'Claude\claude-code-sessions'
-    if ([IO.Directory]::Exists($regular)) { $candidates += $regular }
-    $packages = Join-Path $env:LOCALAPPDATA 'Packages'
-    if ([IO.Directory]::Exists($packages)) {
-        foreach ($package in Get-ChildItem -LiteralPath $packages -Directory -Filter 'Claude_*') {
-            $candidate = Join-Path $package.FullName 'LocalCache\Roaming\Claude\claude-code-sessions'
-            if ([IO.Directory]::Exists($candidate)) { $candidates += $candidate }
+function Get-CHDesktopDataRoots {
+    # Electron children advertise the data directory even when the main process
+    # does not. This follows relocations without depending on an app version,
+    # Store publisher ID, or the name/location of the data directory.
+    $session = [Diagnostics.Process]::GetCurrentProcess().SessionId
+    try {
+        $processes = @(Get-CimInstance Win32_Process -Filter "Name = 'Claude.exe' AND SessionId = $session" -Property CommandLine -ErrorAction Stop)
+    }
+    catch {
+        # Process inspection can be unavailable; closed-app discovery still works.
+        Write-Verbose "Cannot inspect Claude's data directory: $($_.Exception.Message)"
+        return
+    }
+    foreach ($process in $processes) {
+        $argument = [regex]::Match([string]$process.CommandLine,
+            '(?:^|\s)(?:"--user-data-dir=([^"]+)"|--user-data-dir(?:=|\s+)(?:"([^"]+)"|([^\s"]+)))(?=\s|$)')
+        if (-not $argument.Success) { continue }
+        foreach ($group in 1..3) {
+            if ($argument.Groups[$group].Success) {
+                $path = $argument.Groups[$group].Value
+                if ([IO.Path]::IsPathRooted($path)) { [IO.Path]::GetFullPath($path) }
+                break
+            }
         }
     }
-    if ($candidates.Count -ne 1) { throw 'Cannot choose a unique Desktop history directory. Set SessionsRoot in profiles.json to the desired absolute path.' }
-    $candidates[0]
+}
+function Find-CHSessionsRoot {
+    $activeRoots = @(Get-CHDesktopDataRoots | Sort-Object -Unique)
+    $dataRoots = @($activeRoots)
+    if (-not $activeRoots.Count) {
+        # Bounded, read-only fallback for a stopped Desktop. Enumerate installation
+        # names rather than pinning a particular Store family or release.
+        foreach ($base in @($env:APPDATA, $env:LOCALAPPDATA)) {
+            if (-not $base -or -not [IO.Directory]::Exists($base)) { continue }
+            foreach ($directory in Get-ChildItem -LiteralPath $base -Directory -Filter 'Claude*') {
+                $dataRoots += $directory.FullName
+                if ($directory.Attributes -band [IO.FileAttributes]::ReparsePoint) { continue }
+                $dataRoots += @(Get-ChildItem -LiteralPath $directory.FullName -Directory | Select-Object -ExpandProperty FullName)
+            }
+        }
+        if ($env:LOCALAPPDATA) {
+            $packages = Join-Path $env:LOCALAPPDATA 'Packages'
+            if ([IO.Directory]::Exists($packages)) {
+                foreach ($package in Get-ChildItem -LiteralPath $packages -Directory -Filter 'Claude_*') {
+                    $dataRoots += Join-Path $package.FullName 'LocalCache\Roaming\Claude'
+                }
+            }
+        }
+    }
+    $candidates = @(@(foreach ($root in $dataRoots) {
+        $candidate = Join-Path $root 'claude-code-sessions'
+        if ([IO.Directory]::Exists($candidate)) { Assert-CHPath $candidate $candidate }
+    }) | Sort-Object -Unique)
+    if ($candidates.Count -eq 1) { return $candidates[0] }
+    if ($candidates.Count -gt 1) {
+        throw ("Cannot choose a unique Desktop history directory. Candidates: " + ($candidates -join '; ') + '. Close other Desktop installations, or set SessionsRoot in profiles.json to the desired absolute path.')
+    }
+    if ($activeRoots.Count) {
+        throw ("No claude-code-sessions directory exists in the running Desktop data directories: " + ($activeRoots -join '; ') + '. Open a Code session first, or set SessionsRoot in profiles.json to the desired absolute path.')
+    }
+    throw 'Cannot find a Desktop history directory. Open Claude Desktop and a Code session so its data directory can be detected, or set SessionsRoot in profiles.json to the desired absolute path.'
 }
 function Resolve-CHProfile($Catalog, [string]$Selector) {
     if ([string]::IsNullOrWhiteSpace($Selector)) { throw 'Choose profiles using -ProfileA and -ProfileB; use -Mode Profiles to list IDs and known emails.' }
@@ -184,7 +233,10 @@ function Get-CHConfig([string]$Path, [string]$SelectorA='', [string]$SelectorB='
     if ($c.SessionsRoot -eq 'Auto') { $c.SessionsRoot = Find-CHSessionsRoot }
     foreach ($key in @('SessionsRoot', 'ProjectsRoot')) {
         $value = [Environment]::ExpandEnvironmentVariables([string]$c.$key)
-        if (-not [IO.Path]::IsPathRooted($value) -or -not [IO.Directory]::Exists($value)) { throw "Missing configured $key directory." }
+        if (-not [IO.Path]::IsPathRooted($value) -or -not [IO.Directory]::Exists($value)) {
+            $hint = if ($key -eq 'SessionsRoot') { ' Use SessionsRoot: "Auto" to follow the running Desktop installation, or correct the explicit path.' } else { '' }
+            throw "Missing configured $key directory: $value.$hint"
+        }
         $c.$key = Assert-CHPath $value $value
     }
     $configured = @($c.Profiles | Where-Object { $null -ne $_ })
@@ -253,6 +305,19 @@ function Select-CHFields($Record, [string[]]$Fields) {
     [pscustomobject]$out
 }
 function Get-CHViewHash($Record) { Get-CHHash (ConvertTo-CHBytes (Select-CHFields $Record $script:HistoryFields)) }
+function Get-CHLineageParent($Record) {
+    # Match Desktop's effective lineage: a detached card has no attached parent;
+    # a user fork can supersede its inherited spawnedFrom reference.
+    if ($Record.lineageDetached -eq $true) { return }
+    $spawn = $Record.spawnedFrom
+    $fork = [string]$Record.forkedFromSessionId
+    if ($spawn.sideSession -eq $true -and -not $spawn.userFork -and
+        (-not $fork -or $fork -eq $spawn.sessionId -or $fork -eq $spawn.deletedParent.sessionId)) {
+        return [string]$spawn.sessionId
+    }
+    if ($fork) { return $fork }
+    if ($spawn) { return [string]$spawn.sessionId }
+}
 function Get-CHRecords($Context) {
     $c = $Context.Config
     $transcripts = @{}
@@ -290,6 +355,9 @@ function Get-CHRecords($Context) {
                     throw 'Invalid session identity: CLI session ID is not a GUID.'
                 }
                 if ($null -ne $j.PSObject.Properties['isArchived'] -and $j.isArchived -isnot [bool]) { throw 'Invalid archive flag.' }
+                if ($null -ne $j.spawnedFrom -and ($j.spawnedFrom -isnot [pscustomobject] -or $j.spawnedFrom.sessionId -isnot [string] -or [string]::IsNullOrWhiteSpace($j.spawnedFrom.sessionId))) { throw 'Invalid spawnedFrom parent reference.' }
+                if ($null -ne $j.forkedFromSessionId -and ($j.forkedFromSessionId -isnot [string] -or [string]::IsNullOrWhiteSpace($j.forkedFromSessionId))) { throw 'Invalid fork parent reference.' }
+                if ($null -ne $j.lineageDetached -and $j.lineageDetached -isnot [bool]) { throw 'Invalid lineageDetached flag.' }
                 $kind = Get-CHKind $j
                 $hasTranscript = $transcripts.ContainsKey([string]$j.cliSessionId)
                 $perProfile[$f.Name] = [pscustomobject]@{
@@ -421,6 +489,59 @@ function New-CHPlan($Context, [string]$Winner='', [bool]$WithScheduled=$false,
         $reconciled[$name] = $true
         $report.Add([pscustomobject]@{File=$name; Action=$action; Detail="$($sourceProfile.Label) -> $($profile.Label); $decision$archiveDetail"; ArchiveChanged=[bool]$archiveChange})
     }
+    # Validate against the final projected destination, independent of filename
+    # order. Never create a link to a skipped/deleted/mismatched parent or a cycle.
+    # Revert rejected operations before constructing archive indexes and baseline.
+    $projected = @{}; $cardOperations = [Collections.Generic.List[object]]::new()
+    foreach ($p in $c.Profiles) {
+        $cards = @{}
+        foreach ($entry in $data.Records[[string]$p.Name].GetEnumerator()) { $cards[$entry.Key] = $entry.Value.Record }
+        $projected[[string]$p.Name] = $cards
+        foreach ($operation in $ops) {
+            if ($operation.Area -ne 'desktop' -or -not $operation.RelativePath.StartsWith($p.Path + '\', [StringComparison]::OrdinalIgnoreCase)) { continue }
+            $file = [IO.Path]::GetFileName($operation.RelativePath)
+            $cards[$file] = [Text.Encoding]::UTF8.GetString($operation.Bytes) | ConvertFrom-Json
+            $other = if ($p.Name -eq $aName) { $bName } else { $aName }
+            $cardOperations.Add([pscustomobject]@{Operation=$operation; File=$file; Target=$p.Name; Source=$other})
+        }
+    }
+    do {
+        $removed = $false
+        foreach ($entry in @($cardOperations.ToArray())) {
+            $cards = $projected[[string]$entry.Target]
+            $card = $cards[$entry.File]
+            $seen = @{}; $reason = ''
+            while ($null -ne $card) {
+                if ($seen.ContainsKey([string]$card.sessionId)) { $reason = 'Parent lineage contains a cycle'; break }
+                $seen[[string]$card.sessionId] = $true
+                $parentId = Get-CHLineageParent $card
+                if (-not $parentId) { break }
+                if ($parentId -notmatch ('^local_' + $script:GuidPattern + '$')) { $reason = 'Parent lineage is not a local Desktop history reference'; break }
+                $parentFile = $parentId + '.json'
+                if (-not $cards.ContainsKey($parentFile)) { $reason = 'Parent history unavailable in destination (missing, skipped, or deleted): ' + $parentId; break }
+                $sourceParent = $data.Records[[string]$entry.Source][$parentFile]
+                $parent = $cards[$parentFile]
+                $parentCliId = [string]$parent.cliSessionId
+                if ($data.Tombstones.ContainsKey($parentId.Substring(6)) -or ($parentCliId -and $data.Tombstones.ContainsKey($parentCliId))) { $reason = 'Parent history has a deletion marker: ' + $parentId; break }
+                if ($sourceParent -and
+                    (Get-CHHash (ConvertTo-CHBytes (Select-CHFields $sourceParent.Record $script:IdentityFields))) -ne
+                    (Get-CHHash (ConvertTo-CHBytes (Select-CHFields $parent $script:IdentityFields)))) {
+                    $reason = 'Parent session/project identity differs: ' + $parentId; break
+                }
+                $card = $parent
+            }
+            if (-not $reason) { continue }
+            [void]$ops.Remove($entry.Operation)
+            [void]$cardOperations.Remove($entry)
+            $existing = $data.Records[[string]$entry.Target][$entry.File]
+            if ($existing) { $cards[$entry.File] = $existing.Record } else { $cards.Remove($entry.File) }
+            if ($baseline.ContainsKey($entry.File)) { $next[$entry.File] = $baseline[$entry.File] } else { $next.Remove($entry.File) }
+            $reconciled.Remove($entry.File)
+            $row = @($report | Where-Object File -eq $entry.File)[0]
+            $row.Action = 'Skipped'; $row.Detail = $reason; $row.ArchiveChanged = $false
+            $removed = $true
+        }
+    } while ($removed)
     # One-way sync never repairs the source cache, even when cards agree.
     foreach ($p in $c.Profiles) {
         if ($directionTarget -and $p.Name -ne $directionTarget) { continue }
@@ -476,7 +597,8 @@ function Get-CHPreviewRows($Context, $Plan) {
         if ($null -eq $Entry) { return $null }
         $title = if ($Entry.title -is [string] -and -not [string]::IsNullOrWhiteSpace($Entry.title)) { $Entry.title } else { 'Untitled session' }
         [pscustomobject]@{Title=$title; Archived=[bool]$Entry.isArchived; Model=[string]$Entry.model; Effort=[string]$Entry.effort;
-            LastActivityAt=$Entry.lastActivityAt; CompletedTurns=$Entry.completedTurns}
+            LastActivityAt=$Entry.lastActivityAt; CompletedTurns=$Entry.completedTurns;
+            ParentSessionId=(Get-CHLineageParent $Entry); SideSession=[bool]$Entry.spawnedFrom.sideSession; LineageDetached=[bool]$Entry.lineageDetached}
     }
     foreach ($file in @(@($sourceRecords.Keys) + @($targetRecords.Keys) | Sort-Object -Unique)) {
         $source = $sourceRecords[$file]; $target = $targetRecords[$file]
