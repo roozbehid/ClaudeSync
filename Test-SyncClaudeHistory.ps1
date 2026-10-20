@@ -189,6 +189,109 @@ $transcript = Join-Path $ctx.Config.ProjectsRoot ('project\\' + $id + '.jsonl')
 Move-Item -LiteralPath $transcript -Destination (Join-Path $ctx.Config.ProjectsRoot 'fixture-transcript.bin')
 Assert-Test (@((New-CHPlan $ctx -Direction AtoB).Report | Where-Object Detail -eq 'Local transcript missing').Count -eq 1) 'Cloud links do not bypass local transcript requirement'
 
+# Parent links are synced history, including repair of cards from older versions.
+$ctx = New-Fixture
+$parentId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
+$rootId = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'
+$rootCard = Add-Record $ctx 'A' $rootId 'Root'
+$parentCard = Add-Record $ctx 'A' $parentId 'Parent' $false @{spawnedFrom=@{sessionId=('local_' + $rootId);taskId='parent-task';sideSession=$true;name='Parent'}}
+$a = Add-Record $ctx 'A' $id 'Child' $false @{spawnedFrom=@{sessionId=('local_' + $parentId);taskId='child-task';title='Parent';sideSession=$true;name='Child';wakeParent=$true};forkedFromSessionId=('local_' + $parentId);forkedAtMessageUuid=$rootId;lineageDetached=$false;cloudSpawnedTasks=@(@{sessionId='account-bound'})}
+$sourceHash = Get-CHFileHash $a
+$plan = New-CHPlan $ctx -Direction AtoB
+Assert-Test (@($plan.Report | Where-Object Action -eq 'Add').Count -eq 3) 'Parent chain can be added regardless of filename order'
+Apply-Plan $ctx $plan | Out-Null
+$b = Join-Path $ctx.Config.Profiles[1].FullPath ('local_' + $id + '.json')
+$child = [IO.File]::ReadAllText($b) | ConvertFrom-Json
+Assert-Test ($child.spawnedFrom.sessionId -eq ('local_' + $parentId) -and $child.spawnedFrom.sideSession -and $child.spawnedFrom.taskId -eq 'child-task' -and $child.spawnedFrom.name -eq 'Child') 'New side-session cards retain their complete parent metadata'
+Assert-Test ($child.forkedFromSessionId -eq ('local_' + $parentId) -and $child.forkedAtMessageUuid -eq $rootId -and $child.lineageDetached -eq $false) 'Fork origin, message, and attachment state are preserved'
+Assert-Test (-not $child.PSObject.Properties['cloudSpawnedTasks'] -and $child.permissionMode -eq 'default') 'Lineage preservation does not copy cloud ownership or elevated permissions'
+Assert-Test ((New-CHPlan $ctx -Direction AtoB).Operations.Count -eq 0) 'A fully synced parent chain is idempotent'
+
+# Recreate a legacy destination and baseline that did not track lineage at all.
+foreach ($field in $script:LineageFields) { $child.PSObject.Properties.Remove($field) }
+$child | Add-Member -NotePropertyName fixtureDestinationSetting -NotePropertyValue 'retain-me'
+[IO.File]::WriteAllBytes($b, (ConvertTo-CHBytes $child))
+$legacyHash = Get-CHHash (ConvertTo-CHBytes (Select-CHFields $child @($script:HistoryFields | Where-Object { $_ -notin $script:LineageFields })))
+$baselinePath = Join-Path $ctx.StateRoot 'baseline.json'
+$legacyBaseline = [IO.File]::ReadAllText($baselinePath) | ConvertFrom-Json
+$legacyBaseline.Entries.('local_' + $id + '.json') = $legacyHash
+[IO.File]::WriteAllBytes($baselinePath, (ConvertTo-CHBytes $legacyBaseline))
+$missingLinkHash = Get-CHFileHash $b
+$plan = New-CHPlan $ctx -Direction AtoB
+Assert-Test (@($plan.Report | Where-Object { $_.File -eq ('local_' + $id + '.json') -and $_.Action -eq 'Update' }).Count -eq 1) 'Same-title legacy card is updated solely to repair lineage'
+$rows = @(Get-CHPreviewRows $ctx $plan)
+$row = @($rows | Where-Object File -eq ('local_' + $id + '.json'))[0]
+Assert-Test (-not $row.Before.ParentSessionId -and $row.After.ParentSessionId -eq ('local_' + $parentId) -and $row.ChangedFields -contains 'spawnedFrom') 'Preview reports the repaired parent and changed lineage fields'
+$backup = Apply-Plan $ctx $plan
+$repaired = [IO.File]::ReadAllText($b) | ConvertFrom-Json
+Assert-Test ($repaired.spawnedFrom.sideSession -and $repaired.fixtureDestinationSetting -eq 'retain-me') 'Repair restores parent link while preserving destination settings'
+Assert-Test ((Get-CHFileHash $a) -eq $sourceHash) 'Lineage repair leaves the source untouched'
+Assert-Test ((New-CHPlan $ctx -Direction AtoB).Operations.Count -eq 0) 'Repaired legacy cards are idempotent'
+Invoke-CHUndo $ctx (Get-CHUndo $ctx $backup) | Out-Null
+Assert-Test ((Get-CHFileHash $b) -eq $missingLinkHash) 'Undo restores exact pre-repair bytes'
+$changesPlan = New-CHPlan $ctx -Direction Both -Resolution Changes
+Assert-Test (@($changesPlan.Report | Where-Object { $_.File -eq ('local_' + $id + '.json') -and $_.Action -eq 'Update' }).Count -eq 1) 'Old baseline still identifies the lineage-bearing copy as changed in Changes mode'
+
+# Missing/excluded parents and deletion markers must never create orphan chains.
+foreach ($parentMode in @('Absent', 'Environment', 'Deleted', 'MissingTranscript', 'IdentityConflict')) {
+    $ctx = New-Fixture
+    if ($parentMode -ne 'Absent') {
+        $extra = if ($parentMode -eq 'Environment') { @{envScopeId='account-bound'} } else { @{} }
+        Add-Record $ctx 'A' $parentId 'Parent' $false $extra | Out-Null
+    }
+    if ($parentMode -eq 'Deleted') { [IO.File]::WriteAllText((Join-Path $ctx.Config.Profiles[0].FullPath ('deleted_' + $parentId)), '1') }
+    if ($parentMode -eq 'MissingTranscript') {
+        $parentTranscript = Join-Path $ctx.Config.ProjectsRoot ('project\' + $parentId + '.jsonl')
+        [IO.File]::Move($parentTranscript, (Join-Path $ctx.ConfigDirectory 'parent-transcript.fixture'))
+    }
+    if ($parentMode -eq 'IdentityConflict') { Add-Record $ctx 'B' $parentId 'Other parent identity' $false @{cwd='C:\other-project'} | Out-Null }
+    Add-Record $ctx 'A' $id 'Child' $true @{spawnedFrom=@{sessionId=('local_' + $parentId);sideSession=$true}} | Out-Null
+    Add-Record $ctx 'A' $rootId 'Grandchild' $true @{spawnedFrom=@{sessionId=('local_' + $id);sideSession=$true}} | Out-Null
+    $plan = New-CHPlan $ctx -Direction AtoB
+    Assert-Test (@($plan.Report | Where-Object { $_.File -in @(('local_' + $id + '.json'), ('local_' + $rootId + '.json')) -and $_.Action -eq 'Skipped' -and $_.Detail -match 'Parent' }).Count -eq 2) "Unavailable $parentMode parent skips the entire dependent chain"
+    Assert-Test (@($plan.Operations | Where-Object { $_.RelativePath -like '*archived-sessions.idx' -or $_.RelativePath -like ('*local_' + $id + '.json') -or $_.RelativePath -like ('*local_' + $rootId + '.json') }).Count -eq 0) 'Rejected lineage creates no child or archive-index operations'
+}
+$ctx = New-Fixture
+Add-Record $ctx 'A' $id 'Cycle child' $false @{spawnedFrom=@{sessionId=('local_' + $parentId);sideSession=$true}} | Out-Null
+Add-Record $ctx 'A' $parentId 'Cycle parent' $false @{spawnedFrom=@{sessionId=('local_' + $id);sideSession=$true}} | Out-Null
+$plan = New-CHPlan $ctx -Direction AtoB
+Assert-Test (@($plan.Report | Where-Object { $_.Action -eq 'Skipped' -and $_.Detail -match 'cycle|unavailable' }).Count -eq 2) 'Cyclic ancestry is not copied'
+Assert-Test (@($plan.Operations | Where-Object Area -eq 'desktop').Count -eq 0) 'Cycles generate no Desktop writes'
+$ctx = New-Fixture
+Add-Record $ctx 'A' $id 'Detached child' $false @{spawnedFrom=@{sessionId=('local_' + $parentId);sideSession=$true};lineageDetached=$true} | Out-Null
+$plan = New-CHPlan $ctx -Direction AtoB
+Assert-Test (@($plan.Report | Where-Object Action -eq 'Add').Count -eq 1) 'Intentionally detached ancestry does not require a live parent'
+Apply-Plan $ctx $plan | Out-Null
+$detached = [IO.File]::ReadAllText((Join-Path $ctx.Config.Profiles[1].FullPath ('local_' + $id + '.json'))) | ConvertFrom-Json
+Assert-Test ($detached.lineageDetached -and $detached.spawnedFrom.sessionId -eq ('local_' + $parentId)) 'Detached historical ancestry is preserved without reattaching'
+$ctx = New-Fixture
+Add-Record $ctx 'A' $parentId 'Actual fork parent' | Out-Null
+Add-Record $ctx 'A' $id 'User fork' $false @{spawnedFrom=@{sessionId=('local_' + $rootId);sideSession=$true;userFork=$true};forkedFromSessionId=('local_' + $parentId)} | Out-Null
+Assert-Test (@((New-CHPlan $ctx -Direction AtoB).Report | Where-Object Action -eq 'Add').Count -eq 2) 'User fork uses its effective fork parent rather than an inherited spawn parent'
+$ctx = New-Fixture
+foreach ($profile in @('A', 'B')) { Add-Record $ctx $profile $parentId 'Parent' | Out-Null }
+$a = Add-Record $ctx 'A' $id 'Existing child' $false @{spawnedFrom=@{sessionId=('local_' + $parentId);sideSession=$true}}
+$b = Add-Record $ctx 'B' $id 'Existing child' $false @{spawnedFrom=@{sessionId=('local_' + $rootId);sideSession=$true};lineageDetached=$true}
+Apply-Plan $ctx (New-CHPlan $ctx -Direction AtoB) | Out-Null
+$child = [IO.File]::ReadAllText($b) | ConvertFrom-Json
+Assert-Test ($child.spawnedFrom.sessionId -eq ('local_' + $parentId) -and -not $child.PSObject.Properties['lineageDetached']) 'Changed parent and attachment metadata are reconciled even when titles match'
+$source = [IO.File]::ReadAllText($a) | ConvertFrom-Json
+foreach ($field in $script:LineageFields) { $source.PSObject.Properties.Remove($field) }
+[IO.File]::WriteAllBytes($a, (ConvertTo-CHBytes $source))
+Apply-Plan $ctx (New-CHPlan $ctx -Direction AtoB) | Out-Null
+$child = [IO.File]::ReadAllText($b) | ConvertFrom-Json
+Assert-Test (-not $child.PSObject.Properties['spawnedFrom']) 'A parent link removed in the authoritative source is also removed in the destination'
+$ctx = New-Fixture
+foreach ($profile in @('A', 'B')) { Add-Record $ctx $profile $parentId 'Deleted parent' | Out-Null }
+[IO.File]::WriteAllText((Join-Path $ctx.Config.Profiles[0].FullPath ('deleted_' + $parentId)), '1')
+Add-Record $ctx 'A' $id 'Child' $false @{spawnedFrom=@{sessionId=('local_' + $parentId);sideSession=$true}} | Out-Null
+Assert-Test (@((New-CHPlan $ctx -Direction AtoB).Report | Where-Object { $_.File -eq ('local_' + $id + '.json') -and $_.Detail -match 'deletion marker' }).Count -eq 1) 'A physically present but deleted parent cannot acquire new child links'
+foreach ($extra in @(@{spawnedFrom='not-an-object'}, @{spawnedFrom=@{sideSession=$true}}, @{forkedFromSessionId=123}, @{lineageDetached='false'})) {
+    $ctx = New-Fixture
+    Add-Record $ctx 'A' $id 'Malformed lineage' $false $extra | Out-Null
+    Assert-Throws { New-CHPlan $ctx -Direction AtoB } 'Invalid.*parent reference|Invalid lineageDetached' 'Malformed lineage is rejected before writing'
+}
+
 # Account-bound scopes, missing transcripts, and malformed metadata.
 foreach ($extra in @(@{envScopeId='scope'}, @{envScopeId='scope';cloudSpawnedTasks=@(@{sessionId='cloud'})}, @{envScopeId='scope';wslConfig=@{distro='fixture'}})) {
     $ctx = New-Fixture

@@ -60,6 +60,44 @@ test('preview cannot launch a sync', async () => {
   await c.preview();
   assert.deepEqual(calls.map(r => r.action), ['Plan']);
 });
+
+test('large previews use a private file instead of truncated process output', async () => {
+  const snapshot = { Ok: true, Action: 'Plan', Additions: 1, Rows: Array.from({ length: 700 }, (_, i) => ({ File: `${i}.json`, Title: 'Long title '.repeat(100) })), Report: [], RowsTotal: 700 };
+  const text = JSON.stringify(snapshot);
+  assert.ok(text.length > 500_000);
+  const h = await ready({ respond: async action => action === 'Plan' ? {
+    exitCode: 0, stderr: '', stdout: JSON.stringify({ Ok: true, Action: 'Plan', PreviewPath: 'C:/Private/preview.json', PreviewBytes: text.length }),
+  } : null });
+  const reads = [];
+  h.api.readText = async path => { reads.push(path); return text; };
+  await h.c.preview();
+  assert.equal(h.c.view.error, '');
+  assert.equal(h.c.view.previewRows.length, 700);
+  assert.deepEqual(reads, ['C:/Private/preview.json']);
+  assert.ok(h.calls.find(call => call.action === 'Plan').argv.includes('-PreviewFile'));
+  assert.equal(h.calls.some(call => call.action === 'Sync'), false);
+});
+
+test('truncated helper output is reported directly without retrying or writing', async () => {
+  const h = await ready({ respond: async action => action === 'Plan' ? {
+    exitCode: 0, stderr: '', stdout: '{"Ok":true', isStdoutTruncated: true,
+  } : null });
+  await h.c.preview();
+  assert.match(h.c.view.error, /output was truncated/);
+  assert.equal(h.c.view.enabled, false);
+  assert.deepEqual(h.calls.map(call => call.action), ['Plan', 'Release']);
+});
+
+test('failed preview-file reads pause and never start a copy', async () => {
+  const h = await ready({ respond: async action => action === 'Plan' ? {
+    exitCode: 0, stderr: '', stdout: JSON.stringify({ Ok: true, Action: 'Plan', PreviewPath: 'C:/Private/preview.json', PreviewBytes: 500 }),
+  } : null });
+  h.api.readText = async () => { throw new Error('Fixture read failure'); };
+  await h.c.preview();
+  assert.match(h.c.view.error, /Could not read.*Fixture read failure/);
+  assert.equal(h.c.view.preview, null);
+  assert.equal(h.calls.some(call => call.action === 'Sync'), false);
+});
 test('manual sync passes explicit pair through an argument vector without a shell', async () => {
   const { c, calls } = await ready({ config: 'C:/Config path/profiles.json' });
   await c.sync();
@@ -454,6 +492,18 @@ test('comparison shows real titles and exposes file IDs only in selected details
   assert.ok(!textContent(tree).includes('local_archive.json'));
   await control(tree,'details-local_archive.json').onPress();
   assert.match(textContent(renderPane(elements,c)),/Session file: local_archive.json/);
+  assert.equal(calls.length,0);
+});
+
+test('preview details show a repaired parent link and side-session state',async()=>{
+  const {c,calls}=await compared();
+  const row=c.view.previewRows.find(r=>r.File==='local_archive.json');
+  row.After.ParentSessionId='local_parent';row.After.SideSession=true;
+  row.ChangedFields.push('spawnedFrom');
+  c.selectPreview(row.File);
+  const text=textContent(renderPane(elements,c));
+  assert.match(text,/Parent before: None\nParent after: local_parent/);
+  assert.match(text,/Side session after: Yes/);
   assert.equal(calls.length,0);
 });
 test('title search matches old names and copying the filtered table follows the current filter',async()=>{

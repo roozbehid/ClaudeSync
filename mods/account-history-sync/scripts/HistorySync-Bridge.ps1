@@ -7,11 +7,12 @@ param(
     [string]$OwnerSession,
     [string]$SessionId,
     [string]$ConfigPath,
+    [switch]$PreviewFile,
     [switch]$KeepLease
 )
 $ErrorActionPreference = 'Stop'
 # Dot-sourcing the engine has its own param block; retain bridge arguments first.
-$request = @{Action=$Action; Source=$SourceProfile; Target=$TargetProfile; Owner=$OwnerSession; Session=$SessionId; Config=$ConfigPath; KeepLease=[bool]$KeepLease}
+$request = @{Action=$Action; Source=$SourceProfile; Target=$TargetProfile; Owner=$OwnerSession; Session=$SessionId; Config=$ConfigPath; PreviewFile=[bool]$PreviewFile; KeepLease=[bool]$KeepLease}
 $messageBuffer = [Collections.Generic.List[object]]::new()
 try {
     . (Join-Path $PSScriptRoot 'Sync-ClaudeHistory.ps1')
@@ -79,6 +80,29 @@ try {
         $answer.Rows = @($rows | Select-Object -First 1000)
         $answer.RowsTotal = $rows.Count
         $answer.RowsTruncated = $rows.Count -gt 1000
+        if ($request.PreviewFile) {
+            # process.run truncates stdout. Transfer the snapshot through fs.read
+            # instead, whose documented limit is 4 MiB. Apply the size bound to
+            # complete JSON, never to a byte prefix of a document.
+            $previewBytes = ConvertTo-CHBytes $answer
+            while ($previewBytes.Length -gt 4194304 -and ($answer.Rows.Count -or $answer.Report.Count)) {
+                $answer.Rows = @($answer.Rows | Select-Object -First ([int][Math]::Floor($answer.Rows.Count / 2)))
+                $answer.Report = @($answer.Report | Select-Object -First ([int][Math]::Floor($answer.Report.Count / 2)))
+                $answer.RowsTruncated = $answer.Rows.Count -lt $answer.RowsTotal
+                $answer.ReportTruncated = $answer.Report.Count -lt $answer.ReportTotal
+                $previewBytes = ConvertTo-CHBytes $answer
+            }
+            if ($previewBytes.Length -gt 4194304) { throw 'Preview metadata exceeds the file-transfer limit.' }
+            $previewRoot = Assert-CHPath (Join-Path $bridgeRoot 'mod-previews') $bridgeRoot
+            Protect-CHDirectory $previewRoot
+            # One atomic snapshot per session (or pair for standalone callers),
+            # avoiding shared filenames between simultaneous session previews.
+            $previewKey = if ($request.Session) { $request.Session } else { $context.Signature }
+            $previewName = (Get-CHHash (ConvertTo-CHBytes $previewKey)) + '.json'
+            $previewPath = Assert-CHPath (Join-Path $previewRoot $previewName) $previewRoot
+            Write-CHAtomic $previewPath $previewBytes
+            $answer = [ordered]@{Ok=$true; Action='Plan'; PreviewPath=$previewPath; PreviewBytes=$previewBytes.Length; ConfigPath=$bridgeConfig}
+        }
     }
     else {
         if (-not $request.Owner -or $request.Owner.Length -gt 128) { throw 'An owner session ID is required.' }

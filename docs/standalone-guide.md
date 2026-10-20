@@ -199,8 +199,16 @@ precedence. If an email matches several organizations/profiles, use a full profi
 ID. Empty organization folders appear with zero sessions and are not selected
 automatically.
 
-`profiles.json` defaults to `SessionsRoot: "Auto"`, discovering regular or Store
-Desktop installations. If multiple history roots exist, set an explicit path.
+`profiles.json` defaults to `SessionsRoot: "Auto"`. It follows the running
+Desktop's `--user-data-dir` in the current Windows session, so data-root moves
+do not require a saved machine-specific path. With Desktop closed or process
+inspection unavailable, it discovers regular, Store, and `Claude-Data`
+installations under the current user's application-data directories. Ambiguous
+roots are listed in an error instead of choosing one by age. Open Desktop to
+identify the active installation, or set an explicit path. Existing explicit
+paths stay authoritative; if one becomes stale, back up the config and switch
+to `"Auto"` to follow Desktop again. Changes to the history folder name or format
+may still require an engine update.
 ProjectsRoot defaults to the ordinary Windows CLI transcript store and supports
 environment-variable substitutions. To save a default pair, add exactly two
 entries to its Profiles array:
@@ -240,6 +248,16 @@ The mod's Preview table uses real session titles and compares the destination's
 original snapshot with its proposed state. Active/Archived filters use that
 proposed state; conflicts and skipped cards remain unchanged. See the
 [mod instructions](../mods/account-history-sync/README.md#before-and-after-preview).
+
+Local session lineage (`spawnedFrom`, `forkedFromSessionId`,
+`forkedAtMessageUuid`, and `lineageDetached`) is included in both copies and
+updates. A card copied by an older version without its parent link is repaired
+on the next source-to-destination sync, even if its title is unchanged. Preview
+details show the parent before and after. Explicit detachment is preserved.
+Parents and children can be copied together in any filename order. A child whose
+parent or ancestor is unavailable, has a deletion marker, has a different session
+identity, or forms a cycle is skipped with an explanation. No parent is resurrected
+to repair a child, and account-bound cloud task links remain excluded.
 
 Remote Control `bridgeSessionIds` do not prove cloud execution. A remotely
 controlled local session still runs locally. There was no universal `isCloud`

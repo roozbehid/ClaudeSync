@@ -168,6 +168,10 @@ function renderPreviewTable({Box,Text,Button,Select,Input}, controller, copy) {
       Text({bold:true,children:selected.Title.slice(0,1000)}),
       Text({children:`${selected.Action}: ${selected.Detail}`}),
       Text({children:`Before: ${selected.Before?.Title||'Not present'} · ${archiveState(selected.Before)}\nAfter: ${selected.After?.Title||'Not present'} · ${archiveState(selected.After)}`}),
+      ...(selected.Before?.ParentSessionId||selected.After?.ParentSessionId||selected.Before?.LineageDetached||selected.After?.LineageDetached ? [
+        Text({children:`Parent before: ${selected.Before?.ParentSessionId||'None'}\nParent after: ${selected.After?.ParentSessionId||'None'}`}),
+        Text({dimColor:true,children:`Side session after: ${selected.After?.SideSession?'Yes':'No'} · ${selected.After?.LineageDetached?'Detached':'Attached'}`}),
+      ]:[]),
       Text({dimColor:true,children:`Changed fields: ${selected.ChangedFields?.join(', ')||'None'}\nSession file: ${selected.File}`}),
     ]:[]),
   ];

@@ -89,10 +89,22 @@ export function createController() {
     if (action !== 'Release') argv.push('-SessionId', owner);
     if (['Arm', 'Sync', 'Release'].includes(action)) argv.push('-OwnerSession', owner);
     if (keepLease) argv.push('-KeepLease');
+    if (action === 'Plan') argv.push('-PreviewFile');
     const processResult = await api.processRun(argv, { timeoutMs: 90_000 });
     let result;
+    if (processResult.isStdoutTruncated) throw new Error('History helper output was truncated by Claude. Reload the updated History sync plugin and try again.');
     try { result = JSON.parse(processResult.stdout.trim()); }
     catch { throw new Error(`History helper returned invalid output (exit ${processResult.exitCode}). ${processResult.stderr?.slice(0, 500) || ''}`); }
+    if (processResult.exitCode === 0 && result.Ok && result.PreviewPath) {
+      if (action !== 'Plan' || result.Action !== 'Plan' || !Number.isInteger(result.PreviewBytes) || result.PreviewBytes < 1 || result.PreviewBytes > 4 * 1024 * 1024) {
+        throw new Error('History helper returned invalid preview-file metadata.');
+      }
+      try { result = JSON.parse(await api.readText(result.PreviewPath)); }
+      catch (error) { throw new Error(`Could not read the history preview: ${error.message}`); }
+      if (result.Action !== 'Plan' || !Array.isArray(result.Rows) || !Array.isArray(result.Report)) {
+        throw new Error('History helper returned an invalid preview file.');
+      }
+    }
     if (result.Backup) { view.backup = result.Backup; await rememberBackup({ ...result, Ok: result.Ok && processResult.exitCode === 0 }, pair); }
     if (result.ConfigPath) view.configPath = result.ConfigPath;
     if (processResult.exitCode !== 0 || !result.Ok) throw new Error(result.Error || processResult.stderr || 'History helper failed.');
