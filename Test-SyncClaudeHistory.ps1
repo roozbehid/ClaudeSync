@@ -240,7 +240,7 @@ foreach ($parentMode in @('Absent', 'Environment', 'Deleted', 'MissingTranscript
         Add-Record $ctx 'A' $parentId 'Parent' $false $extra | Out-Null
     }
     if ($parentMode -eq 'Deleted') { [IO.File]::WriteAllText((Join-Path $ctx.Config.Profiles[0].FullPath ('deleted_' + $parentId)), '1') }
-    if ($parentMode -eq 'MissingTranscript') {
+    if ($parentMode -in @('Environment', 'MissingTranscript')) {
         $parentTranscript = Join-Path $ctx.Config.ProjectsRoot ('project\' + $parentId + '.jsonl')
         [IO.File]::Move($parentTranscript, (Join-Path $ctx.ConfigDirectory 'parent-transcript.fixture'))
     }
@@ -292,11 +292,34 @@ foreach ($extra in @(@{spawnedFrom='not-an-object'}, @{spawnedFrom=@{sideSession
     Assert-Throws { New-CHPlan $ctx -Direction AtoB } 'Invalid.*parent reference|Invalid lineageDetached' 'Malformed lineage is rejected before writing'
 }
 
-# Account-bound scopes, missing transcripts, and malformed metadata.
+# Scoped local sessions copy history without transferring account scope IDs.
 foreach ($extra in @(@{envScopeId='scope'}, @{envScopeId='scope';cloudSpawnedTasks=@(@{sessionId='cloud'})}, @{envScopeId='scope';wslConfig=@{distro='fixture'}})) {
     $ctx = New-Fixture
-    Add-Record $ctx 'A' $id 'Before' $false $extra | Out-Null
-    Assert-Test (@((New-BothPlan $ctx '').Report | Where-Object Action -eq 'Skipped').Count -eq 1) 'Environment-bound session skipped'
+    $a = Add-Record $ctx 'A' $id 'Scoped local' $false $extra
+    $sourceHash = Get-CHFileHash $a
+    $transcript = Join-Path $ctx.Config.ProjectsRoot ('project\' + $id + '.jsonl')
+    $transcriptHash = Get-CHFileHash $transcript
+    $plan = New-CHPlan $ctx -Direction AtoB
+    Assert-Test (@($plan.Report | Where-Object Action -eq 'Add').Count -eq 1) 'Scoped session with local transcript is eligible'
+    $backup = Apply-Plan $ctx $plan
+    $b = Join-Path $ctx.Config.Profiles[1].FullPath ('local_' + $id + '.json')
+    $copy = [IO.File]::ReadAllText($b) | ConvertFrom-Json
+    Assert-Test ($copy.title -eq 'Scoped local' -and -not $copy.PSObject.Properties['envScopeId'] -and -not $copy.PSObject.Properties['cloudSpawnedTasks']) 'New scoped card omits source scope and cloud links'
+    Assert-Test ((Get-CHFileHash $a) -eq $sourceHash) 'Scoped sync leaves source card unchanged'
+    Invoke-CHUndo $ctx (Get-CHUndo $ctx $backup) | Out-Null
+    Assert-Test (-not [IO.File]::Exists($b)) 'Scoped card addition can be undone'
+    Apply-Plan $ctx (New-CHPlan $ctx -Direction AtoB) | Out-Null
+    $copy | Add-Member -NotePropertyName envScopeId -NotePropertyValue 'destination-scope'
+    [IO.File]::WriteAllBytes($b, (ConvertTo-CHBytes $copy))
+    Set-Record $a 'Renamed scoped local'
+    Apply-Plan $ctx (New-CHPlan $ctx -Direction AtoB) | Out-Null
+    $copy = [IO.File]::ReadAllText($b) | ConvertFrom-Json
+    Assert-Test ($copy.title -eq 'Renamed scoped local' -and $copy.envScopeId -eq 'destination-scope') 'Scoped updates preserve destination scope'
+    Assert-Test ((Get-CHFileHash $transcript) -eq $transcriptHash) 'Scoped sync leaves transcript unchanged'
+    Assert-Test ((New-CHPlan $ctx -Direction AtoB).Operations.Count -eq 0) 'Scoped sync is idempotent'
+    [IO.File]::Move($transcript, (Join-Path $ctx.ConfigDirectory 'scoped-transcript.fixture'))
+    $plan = New-CHPlan $ctx -Direction AtoB
+    Assert-Test (@($plan.Report | Where-Object Detail -eq 'Account-bound environment scope without local transcript').Count -eq 1 -and $plan.Operations.Count -eq 0) 'Scoped cards without local transcripts stay excluded, including remote metadata'
 }
 $ctx = New-Fixture
 $a = Add-Record $ctx 'A' $id
