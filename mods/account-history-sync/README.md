@@ -61,10 +61,13 @@ The menu has three sections:
 
 ## Before and after preview
 
+Scoped sessions with an `envScopeId` are included when their local transcript
+exists. New destination cards omit the source scope ID, and updates retain the
+destination's own scope ID. Scoped sessions without local transcripts stay excluded.
+
 Version 0.5.1 includes local conversations that spawned cloud tasks, provided
 their local transcript exists. New destination cards omit the source's cloud
-task links; existing cards keep their own links. Account-bound environment
-scopes remain excluded.
+task links; existing cards keep their own links.
 
 Version 0.5.0 replaces the filename-heavy preview with a table showing the real
 session title, destination state before, destination state after, and change.

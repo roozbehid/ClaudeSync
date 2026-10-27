@@ -418,9 +418,10 @@ function New-CHPlan($Context, [string]$Winner='', [bool]$WithScheduled=$false,
         if (@($present | Where-Object Pending).Count) { $reason = 'Unfinished Desktop session: CLI session ID missing; card left untouched' }
         # Spawned cloud tasks are account-specific links on a local parent, not
         # evidence that the parent runs in the cloud. CloneFields excludes those
-        # links; updates retain the destination's own links. Still reject actual
-        # account-bound scopes, including cards with other environment indicators.
-        elseif (@($present | Where-Object { $_.Record.envScopeId }).Count) { $reason = 'Account-bound environment scope' }
+        # links; updates retain the destination's own links. Desktop also assigns
+        # envScopeId to local sessions. Require a local transcript to admit scoped
+        # cards; CloneFields omits that account-specific ID from new copies.
+        elseif (@($present | Where-Object { $_.Record.envScopeId -and -not $_.HasTranscript }).Count) { $reason = 'Account-bound environment scope without local transcript' }
         elseif (-not $WithScheduled -and @($present | Where-Object { $_.Record.scheduledTaskId }).Count) { $reason = 'Scheduled history requires -IncludeScheduled' }
         elseif (@($present | Where-Object { -not $_.HasTranscript -and $_.Kind -notin @('WSL', 'SSH') }).Count) { $reason = 'Local transcript missing' }
         elseif (@($present | Where-Object { $data.Tombstones.ContainsKey($_.Id) -or $data.Tombstones.ContainsKey([string]$_.Record.cliSessionId) }).Count) { $reason = 'Deletion marker present' }

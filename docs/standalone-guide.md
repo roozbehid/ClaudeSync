@@ -235,7 +235,7 @@ The inventory uses observed metadata fields, not a documented universal API:
 | SSH | `sshRemoteProcessId`, `sshRemoteTranscriptPath`, or `sshConfig` | Include |
 | Scheduled | `scheduledTaskId` | Optional via IncludeScheduled |
 | LocalWithCloudTasks | Nonempty `cloudSpawnedTasks` | Include local parent when its transcript exists; omit cloud links from new cards |
-| EnvironmentScoped | `envScopeId` | Skip potentially account-bound scopes |
+| EnvironmentScoped | `envScopeId` | Include when a local transcript exists; omit source scope ID from new cards |
 | Local | None of the above, with a main local transcript | Include |
 
 Correctly named Desktop cards can exist before a CLI session starts. Inventory
@@ -267,7 +267,10 @@ are outside this inventory; their absence from it does not mean none exist.
 Likewise, `cloudSpawnedTasks` records children launched from a local parent. It
 does not make that parent a cloud session. Its local title and history can sync;
 new cards omit the source's cloud links, and updates retain the destination's
-own links. An `envScopeId` remains excluded even when other indicators coexist.
+own links. Desktop can also assign an `envScopeId` to local sessions. These cards
+are eligible when their local transcript exists, including when remote metadata
+coexists. New cards omit the source scope ID; updates retain the destination's own
+scope ID. Scoped cards without a local transcript remain excluded.
 
 Copying a card or cloud ID cannot grant another account access to a private cloud
 session. Official sharing can grant viewing access (Team within the organization,
