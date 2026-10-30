@@ -61,6 +61,16 @@ test('preview cannot launch a sync', async () => {
   assert.deepEqual(calls.map(r => r.action), ['Plan']);
 });
 
+test('large-history preview and sync get ten minutes while control calls stay bounded', async () => {
+  const { c, calls } = await ready();
+  await c.preview();
+  await c.sync();
+  await c.refresh();
+  assert.equal(calls.find(call => call.action === 'Plan').init.timeoutMs, 600_000);
+  assert.equal(calls.find(call => call.action === 'Sync').init.timeoutMs, 600_000);
+  assert.equal(calls.find(call => call.action === 'Profiles').init.timeoutMs, 90_000);
+});
+
 test('large previews use a private file instead of truncated process output', async () => {
   const snapshot = { Ok: true, Action: 'Plan', Additions: 1, Rows: Array.from({ length: 700 }, (_, i) => ({ File: `${i}.json`, Title: 'Long title '.repeat(100) })), Report: [], RowsTotal: 700 };
   const text = JSON.stringify(snapshot);
