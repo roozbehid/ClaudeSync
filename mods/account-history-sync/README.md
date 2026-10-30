@@ -250,6 +250,11 @@ the parent before and after. Children with unavailable or mismatched ancestors,
 deletion-marked parents, or cyclic lineage are skipped with a reason; the tool
 does not resurrect a missing parent. Cloud task ownership remains account-specific.
 
+In the comparison, **Before** and **After** both describe the destination account.
+**Not present** in both means the destination has no card and this preview will
+not add one; read the row's skip reason for why. Source-only cards normally become
+additions. Destination-only cards are left alone during one-way sync.
+
 For custom roots or existing labels, set `ACCOUNT_HISTORY_SYNC_CONFIG` to the full
 path of a `profiles.json` before starting Claude, or through Claude's environment
 settings. The script uses that config's directory for state and the mod controller.
@@ -263,6 +268,9 @@ closing Claude. Undo is deliberately not automated by the mod:
 ```powershell
 .\Sync-ClaudeHistory.ps1 -Mode Undo -ConfigPath "$env:LOCALAPPDATA\ClaudeHistorySync\profiles.json" -Backup 'C:\printed\backup\path' -WhatIf
 ```
+
+Preview and Sync allow up to ten minutes for large histories, including fresh
+snapshot checks and backup verification. Other helper actions allow 90 seconds.
 
 After reviewing, remove `-WhatIf` to restore. A timed-out helper can leave a
 prepared receipt under `state\pairs\PAIR_HASH\backups`; inspect that before retrying.

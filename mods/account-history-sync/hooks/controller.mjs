@@ -90,7 +90,10 @@ export function createController() {
     if (['Arm', 'Sync', 'Release'].includes(action)) argv.push('-OwnerSession', owner);
     if (keepLease) argv.push('-KeepLease');
     if (action === 'Plan') argv.push('-PreviewFile');
-    const processResult = await api.processRun(argv, { timeoutMs: 90_000 });
+    // Sync scans both profiles repeatedly to reject stale snapshots and verifies
+    // every backup/write. Large histories can exceed the old 90-second budget.
+    const timeoutMs = ['Plan', 'Sync'].includes(action) ? 600_000 : 90_000;
+    const processResult = await api.processRun(argv, { timeoutMs });
     let result;
     if (processResult.isStdoutTruncated) throw new Error('History helper output was truncated by Claude. Reload the updated History sync plugin and try again.');
     try { result = JSON.parse(processResult.stdout.trim()); }

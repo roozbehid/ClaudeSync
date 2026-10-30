@@ -53,10 +53,17 @@ function Assert-CHPath([string]$Path, [string]$Root) {
     # Inspect all existing ancestors, including those above Root, for junctions.
     $cursor = $full
     while ($cursor) {
-        if (Test-Path -LiteralPath $cursor) {
-            if ((Get-Item -LiteralPath $cursor -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) {
-                throw "Refusing a reparse point: $cursor"
-            }
+        # Avoid PowerShell provider calls for every ancestor of every transcript.
+        # Still inspect each path afresh; caching would miss a replaced junction.
+        $attributes = $null
+        try { $attributes = [IO.File]::GetAttributes($cursor) }
+        catch {
+            $cause = $_.Exception
+            while ($cause.InnerException) { $cause = $cause.InnerException }
+            if ($cause -isnot [IO.FileNotFoundException] -and $cause -isnot [IO.DirectoryNotFoundException]) { throw }
+        }
+        if ($null -ne $attributes -and ($attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            throw "Refusing a reparse point: $cursor"
         }
         $parent = [IO.Path]::GetDirectoryName($cursor)
         if ($parent -eq $cursor) { break }
