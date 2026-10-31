@@ -244,7 +244,10 @@ foreach ($parentMode in @('Absent', 'Environment', 'Deleted', 'MissingTranscript
         $parentTranscript = Join-Path $ctx.Config.ProjectsRoot ('project\' + $parentId + '.jsonl')
         [IO.File]::Move($parentTranscript, (Join-Path $ctx.ConfigDirectory 'parent-transcript.fixture'))
     }
-    if ($parentMode -eq 'IdentityConflict') { Add-Record $ctx 'B' $parentId 'Other parent identity' $false @{cwd='C:\other-project'} | Out-Null }
+    if ($parentMode -eq 'IdentityConflict') {
+        Add-Record $ctx 'B' $parentId 'Other parent identity' $false @{cliSessionId='cccccccc-cccc-4ccc-8ccc-cccccccccccc'} | Out-Null
+        [IO.File]::WriteAllText((Join-Path $ctx.Config.ProjectsRoot 'project\cccccccc-cccc-4ccc-8ccc-cccccccccccc.jsonl'), '{"fixture":"different session"}')
+    }
     Add-Record $ctx 'A' $id 'Child' $true @{spawnedFrom=@{sessionId=('local_' + $parentId);sideSession=$true}} | Out-Null
     Add-Record $ctx 'A' $rootId 'Grandchild' $true @{spawnedFrom=@{sessionId=('local_' + $id);sideSession=$true}} | Out-Null
     $plan = New-CHPlan $ctx -Direction AtoB
@@ -291,6 +294,167 @@ foreach ($extra in @(@{spawnedFrom='not-an-object'}, @{spawnedFrom=@{sideSession
     Add-Record $ctx 'A' $id 'Malformed lineage' $false $extra | Out-Null
     Assert-Throws { New-CHPlan $ctx -Direction AtoB } 'Invalid.*parent reference|Invalid lineageDetached' 'Malformed lineage is rejected before writing'
 }
+
+# Round-trip history after continuing a copied session in another worktree.
+$ctx = New-Fixture
+$parentId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
+$grandchildId = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd'
+$aParent = Add-Record $ctx 'A' $parentId 'Round-trip parent' $false @{cwd='C:\worktrees\original';originCwd='C:\worktrees\original'}
+$aChild = Add-Record $ctx 'A' $id 'Existing child' $false @{spawnedFrom=@{sessionId=('local_' + $parentId);sideSession=$true}}
+Apply-Plan $ctx (New-CHPlan $ctx -Direction AtoB) | Out-Null
+$bParent = Join-Path $ctx.Config.Profiles[1].FullPath ('local_' + $parentId + '.json')
+$bChild = Join-Path $ctx.Config.Profiles[1].FullPath ('local_' + $id + '.json')
+$parent = [IO.File]::ReadAllText($bParent) | ConvertFrom-Json
+Assert-Test ($parent.cwd -eq 'C:\worktrees\original' -and $parent.originCwd -eq 'C:\worktrees\original') 'New cards retain the source working directories'
+$parent.cwd = 'C:\worktrees\continued'; $parent.originCwd = 'C:\worktrees\continued'
+[IO.File]::WriteAllBytes($bParent, (ConvertTo-CHBytes $parent))
+Assert-Test ((New-CHPlan $ctx -Direction BtoA).Operations.Count -eq 0) 'Directory-only changes do not overwrite destination paths or create history changes'
+Set-Record $bParent 'Round-trip parent completed' $true
+Set-Record $bChild 'Existing child completed' $true
+$bGrandchild = Add-Record $ctx 'B' $grandchildId 'New grandchild' $true @{cwd='C:\worktrees\continued';originCwd='C:\worktrees\continued';spawnedFrom=@{sessionId=('local_' + $id);sideSession=$true}}
+$sourceHashes = @{}; foreach ($path in @($bParent, $bChild, $bGrandchild)) { $sourceHashes[$path] = Get-CHFileHash $path }
+$beforeParent = Get-CHFileHash $aParent; $beforeChild = Get-CHFileHash $aChild
+$plan = New-CHPlan $ctx -Direction BtoA
+Assert-Test (@($plan.Report | Where-Object Action -eq 'Update').Count -eq 2 -and @($plan.Report | Where-Object Action -eq 'Add').Count -eq 1) 'Moved parent and existing child update while its new descendant is added on return sync'
+Assert-Test (@($plan.Report | Where-Object { $_.Action -in @('Conflict', 'Skipped') }).Count -eq 0) 'Worktree changes block neither the parent nor its descendant chain'
+$rows = @(Get-CHPreviewRows $ctx $plan)
+Assert-Test (@($rows | Where-Object { $_.After.Archived }).Count -eq 3) 'Return preview shows the entire chain archived'
+$backup = Apply-Plan $ctx $plan
+$returnedParent = [IO.File]::ReadAllText($aParent) | ConvertFrom-Json
+$returnedChild = [IO.File]::ReadAllText($aChild) | ConvertFrom-Json
+$aGrandchild = Join-Path $ctx.Config.Profiles[0].FullPath ('local_' + $grandchildId + '.json')
+$returnedGrandchild = [IO.File]::ReadAllText($aGrandchild) | ConvertFrom-Json
+Assert-Test ($returnedParent.isArchived -and $returnedParent.title -eq 'Round-trip parent completed' -and $returnedChild.isArchived -and $returnedGrandchild.isArchived) 'Return sync applies history and archive flags to parent and descendants'
+Assert-Test ($returnedParent.cwd -eq 'C:\worktrees\original' -and $returnedParent.originCwd -eq 'C:\worktrees\original') 'Return sync preserves the existing destination working directories'
+Assert-Test ($returnedGrandchild.cwd -eq 'C:\worktrees\continued' -and $returnedGrandchild.spawnedFrom.sessionId -eq ('local_' + $id)) 'New descendant keeps source paths and parent lineage'
+$index = [IO.File]::ReadAllText((Join-Path $ctx.Config.Profiles[0].FullPath 'archived-sessions.idx')) | ConvertFrom-Json
+Assert-Test (@($index.archived).Count -eq 3 -and $index.archived -contains ('local_' + $parentId) -and $index.archived -contains ('local_' + $id) -and $index.archived -contains ('local_' + $grandchildId)) 'Destination archive index contains the complete returned chain'
+Assert-Test (@($sourceHashes.Keys | Where-Object { (Get-CHFileHash $_) -ne $sourceHashes[$_] }).Count -eq 0) 'Return sync leaves all source cards unchanged'
+Assert-Test ((New-CHPlan $ctx -Direction BtoA).Operations.Count -eq 0) 'Return sync is idempotent despite different directories'
+Invoke-CHUndo $ctx (Get-CHUndo $ctx $backup) | Out-Null
+Assert-Test ((Get-CHFileHash $aParent) -eq $beforeParent -and (Get-CHFileHash $aChild) -eq $beforeChild -and -not [IO.File]::Exists($aGrandchild)) 'Undo restores exact pre-return cards and removes only the new descendant'
+Apply-Plan $ctx (New-CHPlan $ctx -Direction BtoA) | Out-Null
+foreach ($path in @($bParent, $bChild, $bGrandchild)) { $card = [IO.File]::ReadAllText($path) | ConvertFrom-Json; Set-Record $path $card.title $false }
+Apply-Plan $ctx (New-CHPlan $ctx -Direction BtoA) | Out-Null
+$index = [IO.File]::ReadAllText((Join-Path $ctx.Config.Profiles[0].FullPath 'archived-sessions.idx')) | ConvertFrom-Json
+Assert-Test (@($index.archived).Count -eq 0 -and -not ([IO.File]::ReadAllText($aParent) | ConvertFrom-Json).isArchived) 'Unarchiving also propagates across different working directories'
+
+# Real session/environment mismatches must still reject both card and child writes.
+foreach ($difference in @(@{cliSessionId='cccccccc-cccc-4ccc-8ccc-cccccccccccc'}, @{wslConfig=@{distro='Other'}}, @{sshConfig=@{host='other.invalid'}}, @{sshRemoteTranscriptPath='/other/session.jsonl'})) {
+    $ctx = New-Fixture
+    Add-Record $ctx 'A' $parentId 'Source parent' $true | Out-Null
+    Add-Record $ctx 'B' $parentId 'Different destination identity' $false $difference | Out-Null
+    if ($difference.cliSessionId) {
+        [IO.File]::WriteAllText((Join-Path $ctx.Config.ProjectsRoot ('project\' + $difference.cliSessionId + '.jsonl')), '{"fixture":"different session"}')
+    }
+    Add-Record $ctx 'A' $id 'Child' $true @{spawnedFrom=@{sessionId=('local_' + $parentId);sideSession=$true}} | Out-Null
+    $plan = New-CHPlan $ctx -Direction AtoB
+    Assert-Test (@($plan.Report | Where-Object { $_.File -eq ('local_' + $parentId + '.json') -and $_.Action -eq 'Conflict' }).Count -eq 1) 'Different CLI or remote environment identity still conflicts'
+    Assert-Test (@($plan.Report | Where-Object { $_.File -eq ('local_' + $id + '.json') -and $_.Action -eq 'Skipped' }).Count -eq 1 -and @($plan.Operations | Where-Object Area -eq 'desktop').Count -eq 0) 'Conflicting parent still blocks dependent child and archive-index writes'
+}
+
+# A verified local CLI continuation moves its pointer and history together.
+$ctx = New-Fixture
+$continuedId = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'
+$a = Add-Record $ctx 'A' $parentId 'Before continuation'
+Apply-Plan $ctx (New-CHPlan $ctx -Direction AtoB) | Out-Null
+$b = Join-Path $ctx.Config.Profiles[1].FullPath ('local_' + $parentId + '.json')
+$continued = [IO.File]::ReadAllText($b) | ConvertFrom-Json
+$continued.cliSessionId = $continuedId
+$continued | Add-Member -NotePropertyName priorCliSessionIds -NotePropertyValue @($parentId)
+$continued | Add-Member -NotePropertyName completedTurns -NotePropertyValue 469
+$continued.title = 'Continued history'; $continued.isArchived = $true
+$continued.cwd = 'C:\continued-worktree'
+[IO.File]::WriteAllBytes($b, (ConvertTo-CHBytes $continued))
+$newTranscript = Join-Path $ctx.Config.ProjectsRoot ('project\' + $continuedId + '.jsonl')
+[IO.File]::WriteAllText($newTranscript, '{"fixture":"new continuation transcript"}')
+Add-Record $ctx 'B' $id 'Continuation child' $true @{spawnedFrom=@{sessionId=('local_' + $parentId);sideSession=$true}} | Out-Null
+$beforeA = Get-CHFileHash $a; $sourceHash = Get-CHFileHash $b
+$plan = New-CHPlan $ctx -Direction BtoA
+Assert-Test (@($plan.Report | Where-Object Action -eq 'Update').Count -eq 1 -and @($plan.Report | Where-Object Action -eq 'Add').Count -eq 1) 'Verified local continuation and child can return to the original account'
+$rows = @(Get-CHPreviewRows $ctx $plan)
+$row = @($rows | Where-Object File -eq ('local_' + $parentId + '.json'))[0]
+Assert-Test ($row.Before.CliSessionId -eq $parentId -and $row.After.CliSessionId -eq $continuedId -and $row.ChangedFields -contains 'cliSessionId' -and $row.ChangedFields -contains 'priorCliSessionIds' -and $row.Detail -match 'CLI continuation') 'Preview exposes the transcript pointer transition and prior IDs'
+Assert-Test (@((New-CHPlan $ctx -Direction AtoB).Report | Where-Object Detail -like 'Source is an older CLI continuation*').Count -eq 1) 'One-way sync cannot roll a destination back to an ancestor CLI'
+[IO.File]::SetLastWriteTimeUtc($a, [datetime]::UtcNow.AddDays(1))
+Assert-Test (@((New-CHPlan $ctx -Direction Both -Resolution Newest).Report | Where-Object Detail -like 'CLI continuation differs*').Count -eq 1) 'Automatic newest policy cannot mistake an ancestor resume for the current continuation'
+Assert-Test (@((New-CHPlan $ctx -Direction BtoA -Resolution Changes).Report | Where-Object Detail -like 'CLI continuation differs*').Count -eq 1) 'Change-based policy requires an authoritative source for pointer transitions'
+$plan = New-CHPlan $ctx -Direction BtoA
+$backup = Apply-Plan $ctx $plan
+$returned = [IO.File]::ReadAllText($a) | ConvertFrom-Json
+Assert-Test ($returned.cliSessionId -eq $continuedId -and @($returned.priorCliSessionIds).Count -eq 1 -and $returned.priorCliSessionIds[0] -eq $parentId -and $returned.completedTurns -eq 469 -and $returned.title -eq 'Continued history' -and $returned.isArchived) 'Continuation pointer, chain, title, turns and archive flag move as one unit'
+Assert-Test ($returned.cwd -eq 'C:\project' -and (Get-CHFileHash $b) -eq $sourceHash) 'Continuation update preserves destination paths and source bytes'
+Assert-Test ((New-CHPlan $ctx -Direction BtoA).Operations.Count -eq 0) 'Pointer-aware reconciliation is idempotent'
+Invoke-CHUndo $ctx (Get-CHUndo $ctx $backup) | Out-Null
+Assert-Test ((Get-CHFileHash $a) -eq $beforeA) 'Undo restores the exact old pointer and its history'
+# A shared ancestor does not authorize replacing a different successor branch.
+$branched = [IO.File]::ReadAllText($a) | ConvertFrom-Json
+$branchId = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee'
+$branched.cliSessionId = $branchId
+$branched | Add-Member -NotePropertyName priorCliSessionIds -NotePropertyValue @($parentId)
+[IO.File]::WriteAllBytes($a, (ConvertTo-CHBytes $branched))
+[IO.File]::WriteAllText((Join-Path $ctx.Config.ProjectsRoot ('project\' + $branchId + '.jsonl')), '{"fixture":"different branch"}')
+$branchPlan = New-CHPlan $ctx -Direction BtoA
+Assert-Test (@($branchPlan.Report | Where-Object Action -eq 'Conflict').Count -eq 1 -and @($branchPlan.Report | Where-Object Action -eq 'Skipped').Count -eq 1 -and @($branchPlan.Operations | Where-Object Area -eq 'desktop').Count -eq 0) 'Sibling CLI branches and their dependent child writes stay blocked even with source-wins policy'
+# Missing/deleted continuation segments cannot become new history references.
+$branched.cliSessionId = $parentId; $branched.PSObject.Properties.Remove('priorCliSessionIds')
+[IO.File]::WriteAllBytes($a, (ConvertTo-CHBytes $branched))
+$oldTranscript = Join-Path $ctx.Config.ProjectsRoot ('project\' + $parentId + '.jsonl')
+[IO.File]::Move($oldTranscript, (Join-Path $ctx.ConfigDirectory 'old-transcript.fixture'))
+Assert-Test (@((New-CHPlan $ctx -Direction BtoA).Report | Where-Object { $_.File -eq ('local_' + $parentId + '.json') -and $_.Action -eq 'Skipped' }).Count -eq 1) 'Missing ancestor transcript blocks rollover'
+[IO.File]::Move((Join-Path $ctx.ConfigDirectory 'old-transcript.fixture'), $oldTranscript)
+# A missing intermediate segment is checked even when both current IDs exist.
+$continued.priorCliSessionIds = @($branchId, $parentId)
+$branched | Add-Member -NotePropertyName priorCliSessionIds -NotePropertyValue @($branchId)
+[IO.File]::WriteAllBytes($a, (ConvertTo-CHBytes $branched)); [IO.File]::WriteAllBytes($b, (ConvertTo-CHBytes $continued))
+$intermediateTranscript = Join-Path $ctx.Config.ProjectsRoot ('project\' + $branchId + '.jsonl')
+[IO.File]::Move($intermediateTranscript, (Join-Path $ctx.ConfigDirectory 'intermediate.fixture'))
+Assert-Test (@((New-CHPlan $ctx -Direction BtoA).Report | Where-Object Detail -eq 'CLI continuation transcript missing or deleted').Count -eq 1) 'Missing intermediate transcript blocks rollover even when both current transcripts exist'
+[IO.File]::Move((Join-Path $ctx.ConfigDirectory 'intermediate.fixture'), $intermediateTranscript)
+[IO.File]::WriteAllText((Join-Path $ctx.Config.Profiles[0].FullPath ('deleted_' + $branchId)), '1')
+Assert-Test (@((New-CHPlan $ctx -Direction BtoA).Report | Where-Object Detail -eq 'CLI continuation transcript missing or deleted').Count -eq 1) 'Deletion of an earlier CLI segment blocks rollover'
+
+foreach ($prior in @(@('not-a-guid'), @($parentId, $parentId), @($continuedId), 'not-an-array', @($null))) {
+    $ctx = New-Fixture
+    $path = Add-Record $ctx 'A' $id 'Malformed continuation' $false @{priorCliSessionIds=$prior}
+    # The current ID duplicated in its prior list is also invalid.
+    if ($prior -is [array] -and $prior.Count -eq 1 -and $prior[0] -eq $continuedId) {
+        $card = [IO.File]::ReadAllText($path) | ConvertFrom-Json; $card.cliSessionId = $continuedId
+        [IO.File]::WriteAllBytes($path, (ConvertTo-CHBytes $card))
+    }
+    Assert-Throws { New-CHPlan $ctx -Direction AtoB } 'Invalid CLI continuation history' 'Malformed or cyclic CLI history fails before writes'
+}
+
+# A pointer-only rollover must not be mistaken for matching history summaries.
+$ctx = New-Fixture
+Add-Record $ctx 'A' $id 'Same metadata' | Out-Null
+Add-Record $ctx 'B' $id 'Same metadata' $false @{cliSessionId=$continuedId;priorCliSessionIds=@($id)} | Out-Null
+[IO.File]::WriteAllText((Join-Path $ctx.Config.ProjectsRoot ('project\' + $continuedId + '.jsonl')), '{"fixture":"continued transcript"}')
+$plan = New-CHPlan $ctx -Direction BtoA
+Assert-Test (@($plan.Report | Where-Object Action -eq 'Update').Count -eq 1) 'Pointer-only continuation still plans an update'
+foreach ($profile in $ctx.Config.Profiles) {
+    $path = Join-Path $profile.FullPath ('local_' + $id + '.json')
+    $card = [IO.File]::ReadAllText($path) | ConvertFrom-Json
+    $card | Add-Member -NotePropertyName wslConfig -NotePropertyValue @{distro='SameRemoteEnvironment'}
+    [IO.File]::WriteAllBytes($path, (ConvertTo-CHBytes $card))
+}
+Assert-Test (@((New-CHPlan $ctx -Direction BtoA).Report | Where-Object Action -eq 'Conflict').Count -eq 1) 'Remote CLI rollover remains blocked even for matching remote configuration'
+
+# Legacy history-only hashes remain usable when the complete pointers match.
+$ctx = New-Fixture
+$a = Add-Record $ctx 'A' $id 'Legacy baseline'
+$b = Add-Record $ctx 'B' $id 'Legacy baseline'
+Apply-Plan $ctx (New-CHPlan $ctx -Direction AtoB) | Out-Null
+$baselinePath = Join-Path $ctx.StateRoot 'baseline.json'
+$baseline = [IO.File]::ReadAllText($baselinePath) | ConvertFrom-Json
+$legacyRecord = [IO.File]::ReadAllText($a) | ConvertFrom-Json
+$baseline.Entries.('local_' + $id + '.json') = Get-CHHash (ConvertTo-CHBytes (Select-CHFields $legacyRecord $script:HistoryFields))
+[IO.File]::WriteAllBytes($baselinePath, (ConvertTo-CHBytes $baseline))
+Set-Record $a 'New history'
+Assert-Test (@((New-CHPlan $ctx -Direction Both -Resolution Changes).Report | Where-Object Action -eq 'Update').Count -eq 1) 'Legacy history hashes can select one-sided history changes after full CLI-chain equality is verified'
+Apply-Plan $ctx (New-CHPlan $ctx -Direction AtoB) | Out-Null
+$baseline = [IO.File]::ReadAllText($baselinePath) | ConvertFrom-Json
+Assert-Test ($baseline.Entries.('local_' + $id + '.json').StartsWith('v2:') -and (New-CHPlan $ctx -Direction AtoB).Operations.Count -eq 0) 'Successful sync replaces legacy hash with an idempotent pointer-aware baseline'
 
 # Scoped local sessions copy history without transferring account scope IDs.
 foreach ($extra in @(@{envScopeId='scope'}, @{envScopeId='scope';cloudSpawnedTasks=@(@{sessionId='cloud'})}, @{envScopeId='scope';wslConfig=@{distro='fixture'}})) {

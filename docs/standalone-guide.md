@@ -100,11 +100,25 @@ destination, that record is skipped; the tool never reverses direction. The
 earlier `-PreferProfile original/alternate` interface was replaced.
 
 The policy chooses the whole set of synchronized history fields for a session;
-it does not merge independently conflicting titles and archive flags. Session,
-project, or environment identity conflicts are always skipped. A fixed winner
+it does not merge independently conflicting titles and archive flags. Session
+or remote environment identity conflicts are always skipped. Working-directory
+changes do not change session identity: matching Desktop/CLI IDs can synchronize
+history and archive flags across worktrees. Existing destination working directories
+are preserved; new cards inherit the source directories. A fixed winner
 does not delete sessions missing from it: one-way sync copies only source cards;
 Both can copy new cards from either side, subject to deletion protection. Read
 the conflict/skipped counts; those records do not prevent other records from syncing.
+
+Desktop can continue a local conversation under a new CLI session ID. A Profile
+winner (the default source in one-way sync) can advance an older copy when its full
+ordered CLI history is an exact prefix of the winner's, and every referenced local
+transcript exists without a deletion marker. Current/prior CLI IDs synchronize as
+one unit with the history fields. Preview reports the old and new pointers. The
+tool never rolls a newer continuation back to an older source, merges sibling
+branches, or advances remote session pointers. Newest and Changes report a
+conflict for differing continuations until an explicit Profile winner is chosen.
+Existing history-only baselines remain usable for history changes when both full
+CLI chains match; successful reconciliation upgrades them to pointer-aware hashes.
 
 Newest uses **local metadata file modification time**, rather than the last chat
 message timestamp. That includes archive/title changes without new messages.

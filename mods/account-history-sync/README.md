@@ -250,6 +250,18 @@ the parent before and after. Children with unavailable or mismatched ancestors,
 deletion-marked parents, or cyclic lineage are skipped with a reason; the tool
 does not resurrect a missing parent. Cloud task ownership remains account-specific.
 
+The same Desktop/CLI session can move between working directories or worktrees.
+Those path changes do not block history, archive flags, or child-session links from
+syncing back. Existing destination directories are preserved.
+
+When Desktop continues a local conversation under a new CLI session ID, source-wins
+sync can advance the destination if its complete CLI history is an exact prefix of
+the source history and every referenced local transcript exists and is not deleted.
+The current CLI ID, prior IDs, and history metadata move together. Preview reports
+the pointer change. Older sources cannot roll back a newer continuation; branched
+CLI histories and remote environment differences remain conflicts. Standalone
+Newest/Changes policies require an explicit Profile winner for this transition.
+
 In the comparison, **Before** and **After** both describe the destination account.
 **Not present** in both means the destination has no card and this preview will
 not add one; read the row's skip reason for why. Source-only cards normally become
