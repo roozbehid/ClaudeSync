@@ -156,4 +156,23 @@ $answer=Bridge Release
 Check $answer.Ok 'Scoped controller lease releases normally'
 $cliOutput=@(& $engine -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'Sync-ClaudeHistory.ps1') -Mode Plan -ConfigPath $ctx.ConfigPath -ProfileA A -ProfileB B -Scope Session -ScopeSession ('local_'+$child))
 Check ($LASTEXITCODE -eq 0 -and @($cliOutput|Where-Object {$_ -like 'Scope: Session. 2 source sessions selected.*'}).Count -eq 1) 'Standalone Plan forwards scope arguments and reports the selected source count'
+
+# Open-destination experiments remain explicit, scoped, and subject to snapshots.
+$plan=New-CHPlan $ctx -Scope Session -ScopeSession ('local_'+$parent)
+function Assert-CHStopped {throw 'Fixture Desktop is open.'}
+Throws {Assert-CHWriteAccess $ctx $plan} 'Fixture Desktop is open' 'Ordinary sync still refuses an open Desktop'
+Assert-CHWriteAccess $ctx $plan $false '' $true
+Check $true 'Explicit scoped open-destination mode permits the manual experiment'
+Throws {Assert-CHWriteAccess $ctx $plan $true A $true} 'separate manual mode' 'Open-destination mode cannot masquerade as an active-source declaration'
+$allPlan=New-CHPlan $ctx
+Throws {Assert-CHWriteAccess $ctx $allPlan $false '' $true} 'explicit nonempty' 'Open-destination mode cannot expand to all history'
+$bothPlan=New-CHPlan $ctx -Direction Both
+Throws {Assert-CHWriteAccess $ctx $bothPlan $false '' $true} 'one-way' 'Open-destination mode cannot write both accounts'
+Card $ctx A $parent 'C:\Project' 'Changed after preview'|Out-Null
+Throws {Assert-CHSnapshot $ctx $plan $false '' $true} 'changed during planning' 'Open-destination mode retains stale-snapshot protection'
+$cliOutput=@(& $engine -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'Sync-ClaudeHistory.ps1') -Mode Sync -ConfigPath $ctx.ConfigPath -ProfileA A -ProfileB B -Scope Session -ScopeSession ('local_'+$parent) -AllowOpenDestination)
+Check ($LASTEXITCODE -eq 0 -and @($cliOutput|Where-Object {$_ -like 'Sync complete.*'}).Count -eq 1) 'Standalone scoped open-destination mode applies with verified backup and writes'
+$receiptPath=Get-ChildItem (Join-Path $ctx.StateRoot 'backups') -Filter manifest.json -Recurse|Sort-Object LastWriteTime -Descending|Select-Object -First 1
+$receipt=[IO.File]::ReadAllText($receiptPath.FullName)|ConvertFrom-Json
+Check ($receipt.AllowOpenDestination -and -not $receipt.AllowRunning -and $receipt.Scope.Mode -eq 'Session') 'Backup records the explicit open-destination experiment without claiming an inactive destination'
 Write-Output "PASS: $script:Assertions assertions. Fixtures: $root"

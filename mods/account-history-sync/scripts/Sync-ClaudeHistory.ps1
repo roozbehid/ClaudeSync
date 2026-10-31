@@ -15,6 +15,7 @@ param(
     [ValidateSet('Changes', 'Profile', 'Newest')][string]$Policy,
     [string]$WinnerProfile,
     [switch]$AllowRunning,
+    [switch]$AllowOpenDestination,
     [string]$ActiveProfile,
     [switch]$IncludeScheduled,
     [ValidateSet('All', 'Folder', 'Session')][string]$Scope = 'All',
@@ -766,7 +767,7 @@ function Get-CHPreviewRows($Context, $Plan) {
             Pending=[bool]($source.Pending -or $target.Pending)}
     }
 }
-function Assert-CHWriteAccess($Context, $Plan, [bool]$AllowRunning=$false, [string]$ActiveProfile='') {
+function Assert-CHWriteAccess($Context, $Plan, [bool]$AllowRunning=$false, [string]$ActiveProfile='', [bool]$AllowOpenDestination=$false) {
     if ($Plan.Direction -notin @('AtoB', 'BtoA', 'Both')) { throw 'Invalid plan direction.' }
     if ($Plan.Direction -ne 'Both') {
         $source = if ($Plan.Direction -eq 'AtoB') { $Context.Config.Profiles[0] } else { $Context.Config.Profiles[1] }
@@ -782,7 +783,12 @@ function Assert-CHWriteAccess($Context, $Plan, [bool]$AllowRunning=$false, [stri
             }
         }
     }
-    if ($AllowRunning) {
+    if ($AllowOpenDestination) {
+        if ($AllowRunning -or $ActiveProfile) { throw 'AllowOpenDestination is a separate manual mode; do not combine it with AllowRunning or ActiveProfile.' }
+        if ($Plan.Direction -eq 'Both') { throw 'AllowOpenDestination requires one-way sync.' }
+        if ($Plan.Scope.Mode -notin @('Folder','Session') -or $null -eq $Plan.SelectedFiles -or -not $Plan.SelectedFiles.Count) { throw 'AllowOpenDestination requires an explicit nonempty Folder or Session scope.' }
+    }
+    elseif ($AllowRunning) {
         if ($Plan.Direction -eq 'Both') { throw 'AllowRunning requires one-way Direction; Both requires Claude closed.' }
         if (-not $ActiveProfile) { throw 'AllowRunning requires -ActiveProfile identifying the active source. The destination must be inactive.' }
         if ((Resolve-CHProfile $Context.Config.Profiles $ActiveProfile).Name -ne $Plan.SourceProfile) { throw 'ActiveProfile must be the source; refusing writes to the active destination.' }
@@ -792,8 +798,8 @@ function Assert-CHWriteAccess($Context, $Plan, [bool]$AllowRunning=$false, [stri
         Assert-CHStopped
     }
 }
-function Assert-CHSnapshot($Context, $Plan, [bool]$AllowRunning=$false, [string]$ActiveProfile='') {
-    Assert-CHWriteAccess $Context $Plan $AllowRunning $ActiveProfile
+function Assert-CHSnapshot($Context, $Plan, [bool]$AllowRunning=$false, [string]$ActiveProfile='', [bool]$AllowOpenDestination=$false) {
+    Assert-CHWriteAccess $Context $Plan $AllowRunning $ActiveProfile $AllowOpenDestination
     $fresh = Get-CHRecords $Context
     if ($null -ne $Plan.SelectedFiles) {
         $selected = Get-CHScopeFiles $fresh.Records[$Plan.SourceProfile] $Plan.Scope.Mode $Plan.Scope.Folder $Plan.Scope.Session
@@ -812,14 +818,14 @@ function Assert-CHSnapshot($Context, $Plan, [bool]$AllowRunning=$false, [string]
     }
     if ((($fresh.Tombstones.Keys | Sort-Object) -join ',') -ne (($Plan.Snapshot.Tombstones.Keys | Sort-Object) -join ',')) { throw 'Deletion markers changed during planning.' }
 }
-function Invoke-CHApply($Context, $Plan, [bool]$AllowRunning=$false, [string]$ActiveProfile='') {
-    Assert-CHSnapshot $Context $Plan $AllowRunning $ActiveProfile
+function Invoke-CHApply($Context, $Plan, [bool]$AllowRunning=$false, [string]$ActiveProfile='', [bool]$AllowOpenDestination=$false) {
+    Assert-CHSnapshot $Context $Plan $AllowRunning $ActiveProfile $AllowOpenDestination
     if (-not $Plan.Operations.Count) { Write-Output 'Already synchronized; nothing to write.'; return }
     [void](Assert-CHPath $Context.StateRoot $Context.StateRoot)
     Protect-CHDirectory $Context.StateRoot
     $lock = [IO.File]::Open((Join-Path $Context.StateRoot 'sync.lock'), 'OpenOrCreate', 'ReadWrite', 'None')
     try {
-        Assert-CHSnapshot $Context $Plan $AllowRunning $ActiveProfile
+        Assert-CHSnapshot $Context $Plan $AllowRunning $ActiveProfile $AllowOpenDestination
         $bundle = Assert-CHPath (Join-Path $Context.StateRoot ('backups\' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + [guid]::NewGuid().ToString('N'))) $Context.StateRoot
         [IO.Directory]::CreateDirectory($bundle) | Out-Null
         $entries = [Collections.Generic.List[object]]::new()
@@ -837,12 +843,12 @@ function Invoke-CHApply($Context, $Plan, [bool]$AllowRunning=$false, [string]$Ac
         $manifest = [pscustomobject]@{FormatVersion=2; Signature=$Context.Signature; ProfilePaths=@($Context.Config.Profiles.Path);
             Scope=$Plan.Scope;
             Direction=$Plan.Direction; SourceProfile=$Plan.SourceProfile; TargetProfile=$Plan.TargetProfile;
-            AllowRunning=$AllowRunning; Status='prepared'; Entries=@($entries.ToArray())}
+            AllowRunning=$AllowRunning; AllowOpenDestination=$AllowOpenDestination; Status='prepared'; Entries=@($entries.ToArray())}
         $manifestPath = Join-Path $bundle 'manifest.json'
         Write-CHAtomic $manifestPath (ConvertTo-CHBytes $manifest)
         Write-Output "Backup: $bundle"
         foreach ($op in $Plan.Operations) {
-            Assert-CHWriteAccess $Context $Plan $AllowRunning $ActiveProfile
+            Assert-CHWriteAccess $Context $Plan $AllowRunning $ActiveProfile $AllowOpenDestination
             $root = if ($op.Area -eq 'desktop') { $Context.Config.SessionsRoot } else { $Context.StateRoot }
             [void](Assert-CHPath $op.Path $root)
             if ((Get-CHFileHash $op.Path) -ne $op.Before) { throw "A file changed; use Undo with backup $bundle before retrying." }
@@ -912,7 +918,7 @@ function Invoke-CHUndo($Context, $Undo) {
 
 if ($MyInvocation.InvocationName -ne '.') {
     if (($Scope -ne 'All' -or $ScopeFolder -or $ScopeSession) -and $Mode -notin @('Plan', 'Sync')) { throw 'Sync scope applies only to Plan or Sync. Undo restores the scope recorded in its backup.' }
-    if (($AllowRunning -or $ActiveProfile) -and $Mode -notin @('Plan', 'Sync')) { throw 'AllowRunning and ActiveProfile apply only to Plan or Sync; Undo requires Claude closed.' }
+    if (($AllowRunning -or $ActiveProfile -or $AllowOpenDestination) -and $Mode -notin @('Plan', 'Sync')) { throw 'Live-sync options apply only to Plan or Sync; Undo requires Claude closed.' }
     if ($Mode -eq 'Profiles') {
         $discovery = Get-CHConfig $ConfigPath '' '' $false
         foreach ($p in $discovery.Catalog) {
@@ -942,11 +948,11 @@ if ($MyInvocation.InvocationName -ne '.') {
     $planArgs = @{Context=$context; Winner=$WinnerProfile; WithScheduled=[bool]$IncludeScheduled; Direction=$Direction; Scope=$Scope; ScopeFolder=$ScopeFolder; ScopeSession=$ScopeSession}
     if ($Policy) { $planArgs.Resolution = $Policy }
     $plan = New-CHPlan @planArgs
-    if ($AllowRunning -or $ActiveProfile -or ($Mode -eq 'Sync' -and -not $WhatIfPreference)) {
-        Assert-CHWriteAccess $context $plan ([bool]$AllowRunning) $ActiveProfile
+    if ($AllowRunning -or $ActiveProfile -or $AllowOpenDestination -or ($Mode -eq 'Sync' -and -not $WhatIfPreference)) {
+        Assert-CHWriteAccess $context $plan ([bool]$AllowRunning) $ActiveProfile ([bool]$AllowOpenDestination)
     }
     $plan.Report
     Write-Output "Scope: $($plan.Scope.Mode). $($plan.Scope.Count) source sessions selected. $($plan.Scope.Folder)$($plan.Scope.Session)"
     Write-Output "Direction: $Direction. Policy: $($plan.Policy). Plan: $(@($plan.Report | Where-Object Action -eq 'Add').Count) additions, $(@($plan.Report | Where-Object Action -eq 'Update').Count) updates, $(@($plan.Report | Where-Object Action -eq 'Conflict').Count) conflicts, $(@($plan.Report | Where-Object Action -eq 'Skipped').Count) skipped; $(@($plan.Report | Where-Object ArchiveChanged).Count) archive/unarchive changes."
-    if ($Mode -eq 'Sync' -and $PSCmdlet.ShouldProcess('the configured Claude history profiles', "Back up and sync local history ($Direction)")) { Invoke-CHApply $context $plan ([bool]$AllowRunning) $ActiveProfile }
+    if ($Mode -eq 'Sync' -and $PSCmdlet.ShouldProcess('the configured Claude history profiles', "Back up and sync local history ($Direction)")) { Invoke-CHApply $context $plan ([bool]$AllowRunning) $ActiveProfile ([bool]$AllowOpenDestination) }
 }
