@@ -75,6 +75,14 @@ as additions, so Undo can restore their absence. Changed files and source
 snapshots are checked before applying; target hashes are rechecked before each
 write. These checks do not provide a transaction with Desktop's own writes.
 
+For a manual experiment with an open destination, `-AllowOpenDestination` is
+available only with an explicit Folder or Session scope and a one-way direction.
+Use it alone, without `-AllowRunning` or `-ActiveProfile`. It retains snapshot,
+backup, atomic-write, and hash checks, but cannot force Desktop to refresh cached
+cards or prevent later cached writes. It is not enabled by the in-app controller
+or automatic sync. Close affected conversations, review Plan, and reopen them
+afterward to verify the result. Undo still requires Claude closed.
+
 ## Which copy wins
 
 Default one-way sync uses the source as the winner, including when the destination
