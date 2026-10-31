@@ -27,10 +27,15 @@ $script:LineageFields = @('spawnedFrom', 'forkedFromSessionId', 'forkedAtMessage
 $script:HistoryFields = @('title', 'titleSource', 'isArchived', 'lastActivityAt',
     'completedTurns', 'titleTurn', 'postTurnSummary', 'postTurnSummaryFor',
     'lastAssistantUuid', 'model', 'effort', 'branch', 'sourceBranch', 'writtenBranches') + $script:LineageFields
-$script:IdentityFields = @('sessionId', 'cliSessionId', 'cwd', 'originCwd', 'wslConfig', 'sshConfig', 'sshRemoteTranscriptPath')
+$script:IdentityFields = @('sessionId', 'cliSessionId', 'wslConfig', 'sshConfig', 'sshRemoteTranscriptPath')
+$script:CliFields = @('cliSessionId', 'priorCliSessionIds')
+$script:SyncFields = $script:HistoryFields + $script:CliFields
+# A continuing session can move between worktrees. Paths are needed for new
+# cards, but are not identity and must not overwrite an existing account's paths.
+$script:LocationFields = @('cwd', 'originCwd')
 $script:CloneFields = $script:IdentityFields + $script:HistoryFields + @(
     'createdAt', 'lastFocusedAt', 'worktreePath', 'worktreeName', 'gitAnchors',
-    'priorCliSessionIds', 'sshRemoteProcessId')
+    'priorCliSessionIds', 'sshRemoteProcessId') + $script:LocationFields
 
 function Get-CHHash([byte[]]$Bytes) {
     $sha = [Security.Cryptography.SHA256]::Create()
@@ -311,7 +316,39 @@ function Select-CHFields($Record, [string[]]$Fields) {
     }
     [pscustomobject]$out
 }
-function Get-CHViewHash($Record) { Get-CHHash (ConvertTo-CHBytes (Select-CHFields $Record $script:HistoryFields)) }
+function Get-CHViewHash($Record) {
+    # Prefix separates pointer-aware hashes from legacy history-only baselines.
+    # Old entries still prevent resurrection; they never authorize pointer changes.
+    'v2:' + (Get-CHHash (ConvertTo-CHBytes (Select-CHFields $Record $script:SyncFields)))
+}
+function Get-CHCliChain($Record) {
+    $seen = @{}
+    $prior = $Record.priorCliSessionIds
+    if ($null -ne $prior -and $prior -isnot [array]) { throw 'Invalid CLI continuation history: expected an array.' }
+    foreach ($id in @($prior) + @($Record.cliSessionId)) {
+        if ($null -eq $id -and $null -eq $prior) { continue }
+        if ($id -isnot [string] -or $id -notmatch ('^' + $script:GuidPattern + '$') -or $seen.ContainsKey($id)) {
+            throw 'Invalid CLI continuation history: IDs must be distinct GUIDs.'
+        }
+        $seen[$id] = $true
+        $id
+    }
+}
+function Get-CHCliRelation($Left, $Right) {
+    $stable = @($script:IdentityFields | Where-Object { $_ -ne 'cliSessionId' })
+    if ((Get-CHHash (ConvertTo-CHBytes (Select-CHFields $Left $stable))) -ne
+        (Get-CHHash (ConvertTo-CHBytes (Select-CHFields $Right $stable)))) { return 'Conflict' }
+    $leftChain = @(Get-CHCliChain $Left); $rightChain = @(Get-CHCliChain $Right)
+    $shared = [Math]::Min($leftChain.Count, $rightChain.Count)
+    for ($i=0; $i -lt $shared; $i++) { if ($leftChain[$i] -ne $rightChain[$i]) { return 'Conflict' } }
+    if ($leftChain.Count -eq $rightChain.Count) { return 'Same' }
+    # Remote continuation can also change host-specific transcript references;
+    # only verified local continuation is supported here.
+    foreach ($record in @($Left, $Right)) {
+        if ($record.wslConfig -or $record.sshConfig -or $record.sshRemoteTranscriptPath -or $record.sshRemoteProcessId) { return 'Conflict' }
+    }
+    if ($leftChain.Count -gt $rightChain.Count) { 'LeftContinues' } else { 'RightContinues' }
+}
 function Get-CHLineageParent($Record) {
     # Match Desktop's effective lineage: a detached card has no attached parent;
     # a user fork can supersede its inherited spawnedFrom reference.
@@ -361,6 +398,7 @@ function Get-CHRecords($Context) {
                 if (-not $pending -and ($j.cliSessionId -isnot [string] -or $j.cliSessionId -notmatch ('^' + $script:GuidPattern + '$'))) {
                     throw 'Invalid session identity: CLI session ID is not a GUID.'
                 }
+                if (-not $pending) { [void]@(Get-CHCliChain $j) }
                 if ($null -ne $j.PSObject.Properties['isArchived'] -and $j.isArchived -isnot [bool]) { throw 'Invalid archive flag.' }
                 if ($null -ne $j.spawnedFrom -and ($j.spawnedFrom -isnot [pscustomobject] -or $j.spawnedFrom.sessionId -isnot [string] -or [string]::IsNullOrWhiteSpace($j.spawnedFrom.sessionId))) { throw 'Invalid spawnedFrom parent reference.' }
                 if ($null -ne $j.forkedFromSessionId -and ($j.forkedFromSessionId -isnot [string] -or [string]::IsNullOrWhiteSpace($j.forkedFromSessionId))) { throw 'Invalid fork parent reference.' }
@@ -377,7 +415,7 @@ function Get-CHRecords($Context) {
         }
         $records[[string]$p.Name] = $perProfile
     }
-    [pscustomobject]@{Records=$records; Tombstones=$tombstones; Inventory=$inventory}
+    [pscustomobject]@{Records=$records; Tombstones=$tombstones; Inventory=$inventory; Transcripts=$transcripts}
 }
 function New-CHOperation($Context, [string]$Area, [string]$RelativePath, [byte[]]$Bytes) {
     $root = if ($Area -eq 'desktop') { $Context.Config.SessionsRoot } elseif ($Area -eq 'state') { $Context.StateRoot } else { throw 'Invalid operation area.' }
@@ -435,16 +473,25 @@ function New-CHPlan($Context, [string]$Winner='', [bool]$WithScheduled=$false,
         elseif ($present.Count -eq 1 -and $baseline.ContainsKey($name)) { $reason = 'Previously synced record removed; no resurrection' }
         if ($reason) { $report.Add([pscustomobject]@{File=$name; Action='Skipped'; Detail=$reason}); continue }
         if ($a -and $b) {
-            $ai = Get-CHHash (ConvertTo-CHBytes (Select-CHFields $a.Record $script:IdentityFields))
-            $bi = Get-CHHash (ConvertTo-CHBytes (Select-CHFields $b.Record $script:IdentityFields))
-            if ($ai -ne $bi) { $report.Add([pscustomobject]@{File=$name; Action='Conflict'; Detail='Session/project identity differs'}); continue }
+            $relation = Get-CHCliRelation $a.Record $b.Record
+            if ($relation -eq 'Conflict') { $report.Add([pscustomobject]@{File=$name; Action='Conflict'; Detail='Session/project identity differs or CLI continuation branches'}); continue }
+            if ($relation -ne 'Same' -and $Resolution -ne 'Profile') {
+                $report.Add([pscustomobject]@{File=$name; Action='Conflict'; Detail='CLI continuation differs; choose -Policy Profile -WinnerProfile for the continuing source'}); continue
+            }
             if ($a.ViewHash -eq $b.ViewHash) { $next[$name] = $a.ViewHash; $reconciled[$name] = $true; continue }
             $sourceName = $null
             $decision = ''
             if ($Resolution -eq 'Profile') { $sourceName = $winningName; $decision = 'chosen profile wins' }
             elseif ($baseline.ContainsKey($name)) {
-                if ($a.ViewHash -eq $baseline[$name]) { $sourceName = $bName }
-                elseif ($b.ViewHash -eq $baseline[$name]) { $sourceName = $aName }
+                $aBaselineHash = $a.ViewHash; $bBaselineHash = $b.ViewHash
+                # Legacy history-only hashes remain useful only after the full
+                # current CLI chains have been verified equal above.
+                if ($relation -eq 'Same' -and -not $baseline[$name].StartsWith('v2:')) {
+                    $aBaselineHash = Get-CHHash (ConvertTo-CHBytes (Select-CHFields $a.Record $script:HistoryFields))
+                    $bBaselineHash = Get-CHHash (ConvertTo-CHBytes (Select-CHFields $b.Record $script:HistoryFields))
+                }
+                if ($aBaselineHash -eq $baseline[$name]) { $sourceName = $bName }
+                elseif ($bBaselineHash -eq $baseline[$name]) { $sourceName = $aName }
                 if ($sourceName) { $decision = 'only this copy changed' }
             }
             if (-not $sourceName -and $Resolution -eq 'Newest') {
@@ -465,6 +512,17 @@ function New-CHPlan($Context, [string]$Winner='', [bool]$WithScheduled=$false,
         $targetName = if ($sourceName -eq $aName) { $bName } else { $aName }
         $source = $data.Records[$sourceName][$name]
         $target = $data.Records[$targetName][$name]
+        $continuationDetail = ''
+        if ($target -and $source.Record.cliSessionId -ne $target.Record.cliSessionId) {
+            if ((Get-CHCliRelation $source.Record $target.Record) -ne 'LeftContinues') {
+                $report.Add([pscustomobject]@{File=$name; Action='Conflict'; Detail='Source is an older CLI continuation; refusing to replace the destination with older contents'}); continue
+            }
+            $chain = @(Get-CHCliChain $source.Record)
+            if (@($chain | Where-Object { -not $data.Transcripts.ContainsKey($_) -or $data.Tombstones.ContainsKey($_) }).Count) {
+                $report.Add([pscustomobject]@{File=$name; Action='Skipped'; Detail='CLI continuation transcript missing or deleted'}); continue
+            }
+            $continuationDetail = '; CLI continuation ' + $target.Record.cliSessionId + ' -> ' + $source.Record.cliSessionId
+        }
         $sourceProfile = @($c.Profiles | Where-Object { $_.Name -eq $sourceName })[0]
         $profile = @($c.Profiles | Where-Object { $_.Name -eq $targetName })[0]
         $archiveChange = $target -and ([bool]$target.Record.isArchived -ne [bool]$source.Record.isArchived)
@@ -474,7 +532,7 @@ function New-CHPlan($Context, [string]$Winner='', [bool]$WithScheduled=$false,
             # Do not mutate the destination snapshot while constructing a plan.
             # Preview comparisons and stale-plan checks need its original values.
             $out = [Text.Encoding]::UTF8.GetString((ConvertTo-CHBytes $target.Record)) | ConvertFrom-Json
-            foreach ($key in $script:HistoryFields) {
+            foreach ($key in $script:SyncFields) {
                 if ($null -ne $source.Record.PSObject.Properties[$key]) { $out | Add-Member -NotePropertyName $key -NotePropertyValue $source.Record.$key -Force }
                 else { $out.PSObject.Properties.Remove($key) }
             }
@@ -495,7 +553,7 @@ function New-CHPlan($Context, [string]$Winner='', [bool]$WithScheduled=$false,
         $ops.Add($op)
         $next[$name] = $source.ViewHash
         $reconciled[$name] = $true
-        $report.Add([pscustomobject]@{File=$name; Action=$action; Detail="$($sourceProfile.Label) -> $($profile.Label); $decision$archiveDetail"; ArchiveChanged=[bool]$archiveChange})
+        $report.Add([pscustomobject]@{File=$name; Action=$action; Detail="$($sourceProfile.Label) -> $($profile.Label); $decision$archiveDetail$continuationDetail"; ArchiveChanged=[bool]$archiveChange})
     }
     # Validate against the final projected destination, independent of filename
     # order. Never create a link to a skipped/deleted/mismatched parent or a cycle.
@@ -531,9 +589,7 @@ function New-CHPlan($Context, [string]$Winner='', [bool]$WithScheduled=$false,
                 $parent = $cards[$parentFile]
                 $parentCliId = [string]$parent.cliSessionId
                 if ($data.Tombstones.ContainsKey($parentId.Substring(6)) -or ($parentCliId -and $data.Tombstones.ContainsKey($parentCliId))) { $reason = 'Parent history has a deletion marker: ' + $parentId; break }
-                if ($sourceParent -and
-                    (Get-CHHash (ConvertTo-CHBytes (Select-CHFields $sourceParent.Record $script:IdentityFields))) -ne
-                    (Get-CHHash (ConvertTo-CHBytes (Select-CHFields $parent $script:IdentityFields)))) {
+                if ($sourceParent -and (Get-CHCliRelation $sourceParent.Record $parent) -ne 'Same') {
                     $reason = 'Parent session/project identity differs: ' + $parentId; break
                 }
                 $card = $parent
@@ -605,6 +661,7 @@ function Get-CHPreviewRows($Context, $Plan) {
         if ($null -eq $Entry) { return $null }
         $title = if ($Entry.title -is [string] -and -not [string]::IsNullOrWhiteSpace($Entry.title)) { $Entry.title } else { 'Untitled session' }
         [pscustomobject]@{Title=$title; Archived=[bool]$Entry.isArchived; Model=[string]$Entry.model; Effort=[string]$Entry.effort;
+            CliSessionId=[string]$Entry.cliSessionId; PriorCliSessionIds=@($Entry.priorCliSessionIds | Where-Object { $null -ne $_ });
             LastActivityAt=$Entry.lastActivityAt; CompletedTurns=$Entry.completedTurns;
             ParentSessionId=(Get-CHLineageParent $Entry); SideSession=[bool]$Entry.spawnedFrom.sideSession; LineageDetached=[bool]$Entry.lineageDetached}
     }
@@ -618,7 +675,7 @@ function Get-CHPreviewRows($Context, $Plan) {
         $title = if ($sourceState) { $sourceState.Title } elseif ($before) { $before.Title } else { 'Untitled session' }
         $changed = @()
         if ($planned.ContainsKey($file)) {
-            $changed = @(foreach ($field in $script:HistoryFields) {
+            $changed = @(foreach ($field in $script:SyncFields) {
                 $beforeFields = if ($null -ne $beforeRecord) { Select-CHFields $beforeRecord @($field) } else { [pscustomobject]@{} }
                 $afterFields = Select-CHFields $afterRecord @($field)
                 if ((Get-CHHash (ConvertTo-CHBytes $beforeFields)) -ne (Get-CHHash (ConvertTo-CHBytes $afterFields))) { $field }
