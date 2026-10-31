@@ -19,6 +19,8 @@ into an inactive account.
 - **Preview first:** list profiles and compare planned changes without editing history.
 - **Choose the direction:** source-to-destination by default; reverse or explicitly
   enable two-way sync in the standalone tool.
+- **Choose the scope:** sync one session with its descendants, a project folder
+  such as VRGame, or all eligible history. Preview and sync use the same selection.
 - **Keep metadata consistent:** synchronize titles, archive status, activity
   summaries, and eligible Windows, WSL, and SSH history references.
 - **Recover changes:** exact-byte backups, hash checks, and an explicit Undo command.
@@ -146,6 +148,7 @@ labels are excluded from this repository; tests and the preview use synthetic da
 # Isolated file-operation and bridge tests.
 .\Test-SyncClaudeHistory.ps1 -FixtureDirectory "$env:TEMP\ClaudeSync-tests"
 .\Test-ModBridge.ps1
+.\Test-SyncScopes.ps1
 
 # Independent controller/UI tests.
 node --test .\mods\account-history-sync\tests\controller.test.mjs

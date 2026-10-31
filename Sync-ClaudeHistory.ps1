@@ -17,6 +17,9 @@ param(
     [switch]$AllowRunning,
     [string]$ActiveProfile,
     [switch]$IncludeScheduled,
+    [ValidateSet('All', 'Folder', 'Session')][string]$Scope = 'All',
+    [string]$ScopeFolder,
+    [string]$ScopeSession,
     [string]$Backup
 )
 
@@ -362,6 +365,57 @@ function Get-CHLineageParent($Record) {
     if ($fork) { return $fork }
     if ($spawn) { return [string]$spawn.sessionId }
 }
+function Get-CHFolder($Record) {
+    if ($Record.originCwd -is [string] -and -not [string]::IsNullOrWhiteSpace($Record.originCwd)) { return $Record.originCwd }
+    [string]$Record.cwd
+}
+function Get-CHScopeFiles($Records, [string]$Scope, [string]$Folder, [string]$Session) {
+    $selected = @{}
+    if ($Scope -eq 'All') {
+        if ($Folder -or $Session) { throw 'Choose Folder or Session scope before specifying a selection.' }
+        foreach ($name in $Records.Keys) { $selected[$name] = $true }
+        return ,$selected
+    }
+    if ($Scope -eq 'Session') {
+        if ($Folder -or $Session -notmatch ('^local_' + $script:GuidPattern + '$')) { throw 'Choose a valid source Desktop session ID for Session scope.' }
+        $name = $Session + '.json'
+        if (-not $Records.ContainsKey($name)) { throw 'Selected session is no longer in the source. Refresh sessions.' }
+        $selected[$name] = $true
+    }
+    elseif ($Scope -eq 'Folder') {
+        if ($Session -or [string]::IsNullOrWhiteSpace($Folder) -or -not [IO.Path]::IsPathRooted($Folder)) { throw 'Choose a full source folder path for Folder scope.' }
+        $prefix = $Folder.Replace('/', '\').TrimEnd('\')
+        $comparison = if ($Folder -match '^[A-Za-z]:[\\/]|^\\\\') { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }
+        foreach ($name in $Records.Keys) {
+            $path = (Get-CHFolder $Records[$name].Record).Replace('/', '\').TrimEnd('\')
+            if ($path.Equals($prefix, $comparison) -or $path.StartsWith($prefix + '\', $comparison)) { $selected[$name] = $true }
+        }
+        if (-not $selected.Count) { throw 'No source sessions match this folder. Refresh folders or choose another path.' }
+    }
+    else { throw 'Invalid sync scope.' }
+    # Include all descendants, including children running in separate worktrees.
+    do {
+        $added = $false
+        foreach ($name in $Records.Keys) {
+            if ($selected.ContainsKey($name)) { continue }
+            $parent = Get-CHLineageParent $Records[$name].Record
+            if ($parent -and $selected.ContainsKey($parent + '.json')) { $selected[$name] = $true; $added = $true }
+        }
+    } while ($added)
+    ,$selected
+}
+function Get-CHScopeChoices($Context) {
+    $data = Get-CHRecords $Context
+    $records = $data.Records[[string]$Context.Config.Profiles[0].Name]
+    $folders = [Collections.Hashtable]::new([StringComparer]::Ordinal)
+    $sessions = @(foreach ($entry in $records.Values) {
+        $folder = Get-CHFolder $entry.Record
+        if (-not $folders.ContainsKey($folder)) { $folders[$folder] = 0 }
+        $folders[$folder]++
+        [pscustomobject]@{Id=$entry.Record.sessionId; Title=[string]$entry.Record.title; Folder=$folder; Parent=(Get-CHLineageParent $entry.Record)}
+    })
+    [pscustomobject]@{Folders=@(foreach ($path in @($folders.Keys | Sort-Object)) { [pscustomobject]@{Path=$path; Count=$folders[$path]} }); Sessions=@($sessions | Sort-Object Title,Id)}
+}
 function Get-CHRecords($Context) {
     $c = $Context.Config
     $transcripts = @{}
@@ -424,7 +478,8 @@ function New-CHOperation($Context, [string]$Area, [string]$RelativePath, [byte[]
 }
 function New-CHPlan($Context, [string]$Winner='', [bool]$WithScheduled=$false,
     [ValidateSet('Changes', 'Profile', 'Newest')][string]$Resolution,
-    [ValidateSet('AtoB', 'BtoA', 'Both')][string]$Direction='AtoB') {
+    [ValidateSet('AtoB', 'BtoA', 'Both')][string]$Direction='AtoB',
+    [ValidateSet('All', 'Folder', 'Session')][string]$Scope='All', [string]$ScopeFolder='', [string]$ScopeSession='') {
     $c = $Context.Config
     $aName = [string]$c.Profiles[0].Name; $bName = [string]$c.Profiles[1].Name
     $directionSource = if ($Direction -eq 'AtoB') { $aName } elseif ($Direction -eq 'BtoA') { $bName } else { '' }
@@ -439,6 +494,10 @@ function New-CHPlan($Context, [string]$Winner='', [bool]$WithScheduled=$false,
     }
     elseif ($Winner) { throw 'WinnerProfile applies only to Policy Profile.' }
     $data = Get-CHRecords $Context
+    if ($Scope -ne 'All' -and $Direction -eq 'Both') { throw 'Folder and Session scopes require one-way sync.' }
+    $scopeSource = if ($directionSource) { $directionSource } else { $aName }
+    $selection = Get-CHScopeFiles $data.Records[$scopeSource] $Scope $ScopeFolder $ScopeSession
+    $selectedFiles = if ($Scope -ne 'All') { $selection } else { $null }
     $stateFile = Assert-CHPath (Join-Path $Context.StateRoot 'baseline.json') $Context.StateRoot
     $stateBefore = Get-CHFileHash $stateFile
     $baseline = @{}
@@ -452,7 +511,9 @@ function New-CHPlan($Context, [string]$Winner='', [bool]$WithScheduled=$false,
     $ops = [Collections.Generic.List[object]]::new()
     $report = [Collections.Generic.List[object]]::new()
     $allNames = @(@($data.Records[$aName].Keys) + @($data.Records[$bName].Keys) | Sort-Object -Unique)
+    $scopeCount = if ($Direction -eq 'Both') { $allNames.Count } else { $selection.Count }
     foreach ($name in $allNames) {
+        if ($null -ne $selectedFiles -and -not $selectedFiles.ContainsKey($name)) { continue }
         $a = $data.Records[$aName][$name]; $b = $data.Records[$bName][$name]
         if ($directionSource -and -not $data.Records[$directionSource].ContainsKey($name)) {
             $report.Add([pscustomobject]@{File=$name; Action='Skipped'; Detail='Destination-only card; reverse copying disabled'})
@@ -642,7 +703,23 @@ function New-CHPlan($Context, [string]$Winner='', [bool]$WithScheduled=$false,
     $stateOp = New-CHOperation $Context 'state' 'baseline.json' (ConvertTo-CHBytes ([ordered]@{FormatVersion=1; Signature=$Context.Signature; Entries=$ordered}))
     $stateOp.Before = $stateBefore
     if ($stateOp.Before -ne $stateOp.After) { $ops.Add($stateOp) }
+    $readFiles = @{}
+    if ($null -ne $selectedFiles) {
+        foreach ($name in $selectedFiles.Keys) { $readFiles[$name] = $true }
+        do {
+            $added = $false
+            foreach ($profileRecords in $data.Records.Values) {
+                foreach ($name in @($readFiles.Keys)) {
+                    $entry = $profileRecords[$name]
+                    if (-not $entry) { continue }
+                    $parent = Get-CHLineageParent $entry.Record
+                    if ($parent -and -not $readFiles.ContainsKey($parent + '.json')) { $readFiles[$parent + '.json'] = $true; $added = $true }
+                }
+            }
+        } while ($added)
+    }
     [pscustomobject]@{Operations=$ops; Report=$report; Inventory=$data.Inventory; Snapshot=$data;
+        Scope=[pscustomobject]@{Mode=$Scope; Folder=$ScopeFolder; Session=$ScopeSession; Count=$scopeCount}; SelectedFiles=$selectedFiles; ReadFiles=$readFiles;
         Direction=$Direction; SourceProfile=$directionSource; TargetProfile=$directionTarget; Policy=$Resolution}
 }
 function Get-CHPreviewRows($Context, $Plan) {
@@ -666,6 +743,7 @@ function Get-CHPreviewRows($Context, $Plan) {
             ParentSessionId=(Get-CHLineageParent $Entry); SideSession=[bool]$Entry.spawnedFrom.sideSession; LineageDetached=[bool]$Entry.lineageDetached}
     }
     foreach ($file in @(@($sourceRecords.Keys) + @($targetRecords.Keys) | Sort-Object -Unique)) {
+        if ($null -ne $Plan.SelectedFiles -and -not $Plan.SelectedFiles.ContainsKey($file)) { continue }
         $source = $sourceRecords[$file]; $target = $targetRecords[$file]
         $beforeRecord = if ($target) { $target.Record } else { $null }
         $afterRecord = if ($planned.ContainsKey($file)) { $planned[$file] } else { $beforeRecord }
@@ -682,6 +760,7 @@ function Get-CHPreviewRows($Context, $Plan) {
             })
         }
         [pscustomobject]@{File=$file; Title=$title; Action=$(if ($entry) { $entry.Action } else { 'Unchanged' });
+            Folder=$(if ($source) { Get-CHFolder $source.Record } else { Get-CHFolder $target.Record });
             Detail=$(if ($entry) { $entry.Detail } else { 'Already matches; no card change' });
             Source=$sourceState; Before=$before; After=$after; ChangedFields=$changed;
             Pending=[bool]($source.Pending -or $target.Pending)}
@@ -696,6 +775,10 @@ function Assert-CHWriteAccess($Context, $Plan, [bool]$AllowRunning=$false, [stri
         foreach ($op in $Plan.Operations) {
             if ($op.Area -eq 'desktop' -and -not $op.RelativePath.StartsWith($target.Path + '\', [StringComparison]::OrdinalIgnoreCase)) {
                 throw 'One-way plan attempted a write outside the destination profile.'
+            }
+            if ($op.Area -eq 'desktop' -and $null -ne $Plan.SelectedFiles) {
+                $file = [IO.Path]::GetFileName($op.RelativePath)
+                if ($file -ne 'archived-sessions.idx' -and -not $Plan.SelectedFiles.ContainsKey($file)) { throw 'Plan attempted a write outside the selected scope.' }
             }
         }
     }
@@ -712,11 +795,18 @@ function Assert-CHWriteAccess($Context, $Plan, [bool]$AllowRunning=$false, [stri
 function Assert-CHSnapshot($Context, $Plan, [bool]$AllowRunning=$false, [string]$ActiveProfile='') {
     Assert-CHWriteAccess $Context $Plan $AllowRunning $ActiveProfile
     $fresh = Get-CHRecords $Context
+    if ($null -ne $Plan.SelectedFiles) {
+        $selected = Get-CHScopeFiles $fresh.Records[$Plan.SourceProfile] $Plan.Scope.Mode $Plan.Scope.Folder $Plan.Scope.Session
+        if ((($selected.Keys | Sort-Object) -join ',') -ne (($Plan.SelectedFiles.Keys | Sort-Object) -join ',')) { throw 'Selected session tree changed during planning. Run again.' }
+    }
     foreach ($p in $Context.Config.Profiles) {
         $old = $Plan.Snapshot.Records[[string]$p.Name]
         $new = $fresh.Records[[string]$p.Name]
-        if ($old.Count -ne $new.Count) { throw 'History changed during planning. Run again.' }
-        foreach ($key in $old.Keys) {
+        if ($null -eq $Plan.SelectedFiles -and $old.Count -ne $new.Count) { throw 'History changed during planning. Run again.' }
+        $keys = if ($null -eq $Plan.SelectedFiles) { @($old.Keys) } else { @($Plan.ReadFiles.Keys) }
+        foreach ($key in $keys) {
+            if (-not $old.ContainsKey($key) -and -not $new.ContainsKey($key)) { continue }
+            if (-not $old.ContainsKey($key)) { throw 'History changed during planning. Run again.' }
             if (-not $new.ContainsKey($key) -or $new[$key].FileHash -ne $old[$key].FileHash -or $new[$key].ModifiedUtc -ne $old[$key].ModifiedUtc) { throw 'History changed during planning. Run again.' }
         }
     }
@@ -745,6 +835,7 @@ function Invoke-CHApply($Context, $Plan, [bool]$AllowRunning=$false, [string]$Ac
             $i++
         }
         $manifest = [pscustomobject]@{FormatVersion=2; Signature=$Context.Signature; ProfilePaths=@($Context.Config.Profiles.Path);
+            Scope=$Plan.Scope;
             Direction=$Plan.Direction; SourceProfile=$Plan.SourceProfile; TargetProfile=$Plan.TargetProfile;
             AllowRunning=$AllowRunning; Status='prepared'; Entries=@($entries.ToArray())}
         $manifestPath = Join-Path $bundle 'manifest.json'
@@ -820,6 +911,7 @@ function Invoke-CHUndo($Context, $Undo) {
 }
 
 if ($MyInvocation.InvocationName -ne '.') {
+    if (($Scope -ne 'All' -or $ScopeFolder -or $ScopeSession) -and $Mode -notin @('Plan', 'Sync')) { throw 'Sync scope applies only to Plan or Sync. Undo restores the scope recorded in its backup.' }
     if (($AllowRunning -or $ActiveProfile) -and $Mode -notin @('Plan', 'Sync')) { throw 'AllowRunning and ActiveProfile apply only to Plan or Sync; Undo requires Claude closed.' }
     if ($Mode -eq 'Profiles') {
         $discovery = Get-CHConfig $ConfigPath '' '' $false
@@ -847,13 +939,14 @@ if ($MyInvocation.InvocationName -ne '.') {
         return
     }
     Write-Host 'Reading Desktop history records and transcript filenames (offline)...'
-    $planArgs = @{Context=$context; Winner=$WinnerProfile; WithScheduled=[bool]$IncludeScheduled; Direction=$Direction}
+    $planArgs = @{Context=$context; Winner=$WinnerProfile; WithScheduled=[bool]$IncludeScheduled; Direction=$Direction; Scope=$Scope; ScopeFolder=$ScopeFolder; ScopeSession=$ScopeSession}
     if ($Policy) { $planArgs.Resolution = $Policy }
     $plan = New-CHPlan @planArgs
     if ($AllowRunning -or $ActiveProfile -or ($Mode -eq 'Sync' -and -not $WhatIfPreference)) {
         Assert-CHWriteAccess $context $plan ([bool]$AllowRunning) $ActiveProfile
     }
     $plan.Report
+    Write-Output "Scope: $($plan.Scope.Mode). $($plan.Scope.Count) source sessions selected. $($plan.Scope.Folder)$($plan.Scope.Session)"
     Write-Output "Direction: $Direction. Policy: $($plan.Policy). Plan: $(@($plan.Report | Where-Object Action -eq 'Add').Count) additions, $(@($plan.Report | Where-Object Action -eq 'Update').Count) updates, $(@($plan.Report | Where-Object Action -eq 'Conflict').Count) conflicts, $(@($plan.Report | Where-Object Action -eq 'Skipped').Count) skipped; $(@($plan.Report | Where-Object ArchiveChanged).Count) archive/unarchive changes."
     if ($Mode -eq 'Sync' -and $PSCmdlet.ShouldProcess('the configured Claude history profiles', "Back up and sync local history ($Direction)")) { Invoke-CHApply $context $plan ([bool]$AllowRunning) $ActiveProfile }
 }

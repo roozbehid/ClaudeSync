@@ -61,6 +61,112 @@ test('preview cannot launch a sync', async () => {
   assert.deepEqual(calls.map(r => r.action), ['Plan']);
 });
 
+test('scope choices load on demand through a file without previewing or copying', async () => {
+  const choices={Ok:true,Action:'Choices',Folders:[{Path:'D:\\Projects\\VRGame',Count:2}],Sessions:[{Id:'local_aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',Title:'Code Altar',Folder:'D:\\Projects\\VRGame'}]};
+  const h=await ready({respond:async action=>action==='Choices'?{exitCode:0,stdout:JSON.stringify({Ok:true,Action:'Choices',PreviewPath:'C:/Private/choices.json',PreviewBytes:JSON.stringify(choices).length})}:null});
+  h.api.readText=async()=>JSON.stringify(choices);
+  await h.c.chooseScope('Folder');
+  h.calls.length=0;
+  await h.c.loadChoices();
+  assert.deepEqual(h.c.view.scopeFolders,choices.Folders);
+  assert.deepEqual(h.c.view.scopeSessions,choices.Sessions);
+  assert.deepEqual(h.calls.map(call=>call.action),['Choices']);
+  assert.ok(h.calls[0].argv.includes('-PreviewFile'));
+  assert.equal(h.calls[0].init.timeoutMs,600_000);
+});
+
+test('folder scope reaches preview, manual sync and armed automatic sync unchanged', async () => {
+  const h=await ready();
+  await h.c.chooseScope('Folder','D:\\Projects Games\\VRGame');
+  await h.c.preview();
+  assert.match(h.c.view.preview.scopeLabel,/VRGame/);
+  await h.c.start();
+  for(const call of h.calls.filter(call=>['Plan','Arm','Sync'].includes(call.action))){
+    assert.equal(call.argv[call.argv.indexOf('-Scope')+1],'Folder');
+    assert.equal(call.argv[call.argv.indexOf('-ScopeFolder')+1],'D:\\Projects Games\\VRGame');
+  }
+  assert.match(h.c.view.lastResult.scopeLabel,/VRGame/);
+  assert.match(h.c.view.receipts[0].scopeLabel,/VRGame/);
+});
+
+test('changing scope pauses automation and clears stale previews without starting a copy', async () => {
+  const h=await ready();
+  await h.c.start(); await h.c.preview();
+  h.calls.length=0;
+  await h.c.chooseScope('Session','local_aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa');
+  assert.equal(h.c.view.enabled,false);
+  assert.equal(h.c.view.preview,null);
+  assert.deepEqual(h.calls.map(call=>call.action),['Release']);
+  const before=h.calls.length;
+  await h.timers[0].fn();
+  assert.equal(h.calls.length,before);
+  await h.c.sync();
+  const call=h.calls.find(call=>call.action==='Sync');
+  assert.equal(call.argv[call.argv.indexOf('-ScopeSession')+1],'local_aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa');
+});
+
+test('empty folder or session selections cannot fall back to all-history sync', async () => {
+  const h=await ready();
+  for(const mode of ['Folder','Session']){
+    await h.c.chooseScope(mode); h.calls.length=0;
+    await h.c.sync();
+    assert.equal(h.calls.some(call=>call.action==='Sync'),false);
+    assert.match(h.c.view.error,/Choose a (folder|session)/);
+  }
+});
+
+test('scope is restored only for its account pair and never re-enables automatic sync', async () => {
+  const h=await ready();
+  await h.c.chooseScope('Folder','D:\\Projects\\VRGame');
+  await h.c.choose(A,'');
+  assert.equal(h.c.view.scopeMode,'All');
+  await h.c.choose(A,B);
+  assert.equal(h.c.view.scopeFolder,'D:\\Projects\\VRGame');
+  const restored=await ready({saved:Object.fromEntries(h.saved)});
+  assert.equal(restored.c.view.scopeMode,'Folder');
+  assert.equal(restored.c.view.scopeFolder,'D:\\Projects\\VRGame');
+  assert.equal(restored.c.view.enabled,false);
+  assert.equal(restored.calls.some(call=>call.action==='Sync'),false);
+});
+
+test('an unfinished saved selection stays unselected after reload instead of widening to All', async () => {
+  const h=await ready();
+  await h.c.chooseScope('Session');
+  const restored=await ready({saved:Object.fromEntries(h.saved)});
+  assert.equal(restored.c.view.scopeMode,'Session');
+  await restored.c.sync();
+  assert.equal(restored.calls.some(call=>call.action==='Sync'),false);
+  assert.match(restored.c.view.error,/Choose a session/);
+});
+
+test('changing scope during Arm prevents the previous selection from starting a copy', async () => {
+  let finishArm;
+  const h=await ready({respond:async action=>action==='Arm'?new Promise(resolve=>{finishArm=()=>resolve({exitCode:0,stdout:JSON.stringify({Ok:true,Action:'Arm'})});}):null});
+  const starting=h.c.start();
+  while(!finishArm) await Promise.resolve();
+  const changing=h.c.chooseScope('Folder','D:\\VRGame');
+  finishArm();
+  await Promise.all([starting,changing]);
+  assert.equal(h.c.view.enabled,false);
+  assert.equal(h.c.view.scopeFolder,'D:\\VRGame');
+  assert.equal(h.calls.some(call=>call.action==='Sync'),false);
+});
+
+test('scope selectors and session search operate through the sync pane', async () => {
+  const h=await ready(); h.c.showSection('sync');
+  let pane=renderPane(elements,h.c,async()=>({isCopied:true}));
+  await control(pane,'sync-scope').onSelect('Session');
+  h.c.view.scopeSessions=[{Id:'local_aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',Title:'Code Altar',Folder:'D:\\VRGame'},{Id:'local_bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',Title:'Other project',Folder:'D:\\Other'}];
+  pane=renderPane(elements,h.c,async()=>({isCopied:true}));
+  control(pane,'scope-search').onInput('Code Altar');
+  pane=renderPane(elements,h.c,async()=>({isCopied:true}));
+  const picker=control(pane,'scope-session');
+  assert.equal(picker.options.length,2);
+  await picker.onSelect(picker.options[1].value);
+  assert.match(h.c.view.scopeLabel,/Code Altar/);
+  assert.match(textContent(renderPane(elements,h.c,async()=>({isCopied:true}))),/parent already in the destination/);
+});
+
 test('large-history preview and sync get ten minutes while control calls stay bounded', async () => {
   const { c, calls } = await ready();
   await c.preview();

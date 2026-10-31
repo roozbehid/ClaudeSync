@@ -267,6 +267,30 @@ In the comparison, **Before** and **After** both describe the destination accoun
 not add one; read the row's skip reason for why. Source-only cards normally become
 additions. Destination-only cards are left alone during one-way sync.
 
+### Choose a folder or session
+
+In **Sync**, set **Sync scope** to **Folder and its session trees** or **One session
+and its descendants**, then select **Load folders and sessions**. Folder choices
+show full original project paths and counts. For VRGame, choose
+`D:\Projects_Games\VRGame`. The session picker can search by title or folder.
+
+Folder scope includes subfolders and descendants in other worktrees. Session
+scope includes only the chosen session and its descendants; a leaf syncs alone.
+A child selected without its ancestors needs its matching parent already in the
+destination, otherwise Preview explains the skip. Selecting its parent includes
+the full descendant tree. Preview filters such as Active/Archived and title search
+only change the displayed rows; **Sync scope** determines what can be written.
+
+The scope is remembered separately for each source/destination pair. Changing it
+pauses auto-sync and clears the preview. An unfinished or missing selection never
+falls back to All history. Backups and copied previews show their original scope.
+Only selected cards are changed, and unrelated archive entries are preserved.
+
+The source account can remain open. Keep the destination inactive, including when
+only history or transcript pointers change: Desktop can cache and rewrite those
+cards. Local transcript contents already live in the shared `.claude\projects`
+store, so the tool updates references rather than copying conversation files.
+
 For custom roots or existing labels, set `ACCOUNT_HISTORY_SYNC_CONFIG` to the full
 path of a `profiles.json` before starting Claude, or through Claude's environment
 settings. The script uses that config's directory for state and the mod controller.
@@ -304,6 +328,7 @@ credentials, or transcripts. See the repository README for eligibility and polic
 node --test .\mods\account-history-sync\tests\controller.test.mjs
 .\Test-SessionsDiscovery.ps1
 .\Test-ModBridge.ps1
+.\Test-SyncScopes.ps1
 claude plugin test .\mods\account-history-sync
 ```
 

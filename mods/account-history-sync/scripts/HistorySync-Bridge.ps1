@@ -1,18 +1,21 @@
 #requires -Version 5.1
 [CmdletBinding()]
 param(
-    [ValidateSet('Profiles', 'Plan', 'Arm', 'Sync', 'Release')][string]$Action = 'Profiles',
+    [ValidateSet('Profiles', 'Choices', 'Plan', 'Arm', 'Sync', 'Release')][string]$Action = 'Profiles',
     [string]$SourceProfile,
     [string]$TargetProfile,
     [string]$OwnerSession,
     [string]$SessionId,
     [string]$ConfigPath,
+    [ValidateSet('All', 'Folder', 'Session')][string]$Scope = 'All',
+    [string]$ScopeFolder,
+    [string]$ScopeSession,
     [switch]$PreviewFile,
     [switch]$KeepLease
 )
 $ErrorActionPreference = 'Stop'
 # Dot-sourcing the engine has its own param block; retain bridge arguments first.
-$request = @{Action=$Action; Source=$SourceProfile; Target=$TargetProfile; Owner=$OwnerSession; Session=$SessionId; Config=$ConfigPath; PreviewFile=[bool]$PreviewFile; KeepLease=[bool]$KeepLease}
+$request = @{Action=$Action; Source=$SourceProfile; Target=$TargetProfile; Owner=$OwnerSession; Session=$SessionId; Config=$ConfigPath; PreviewFile=[bool]$PreviewFile; KeepLease=[bool]$KeepLease; Scope=$Scope; ScopeFolder=$ScopeFolder; ScopeSession=$ScopeSession}
 $messageBuffer = [Collections.Generic.List[object]]::new()
 try {
     . (Join-Path $PSScriptRoot 'Sync-ClaudeHistory.ps1')
@@ -65,11 +68,28 @@ try {
         $answer = [ordered]@{Ok=$true; Action='Profiles'; Profiles=$profiles; SessionProfiles=$matches;
             CurrentProfile=$(if ($matches.Count -eq 1) { $matches[0] } else { '' }); ConfigPath=$bridgeConfig}
     }
+    elseif ($request.Action -eq 'Choices') {
+        $context = Get-CHConfig $bridgeConfig $request.Source $request.Target
+        Assert-SessionSource $context
+        $choices = Get-CHScopeChoices $context
+        $answer = [ordered]@{Ok=$true; Action='Choices'; Folders=$choices.Folders; Sessions=$choices.Sessions; ConfigPath=$bridgeConfig}
+        if ($request.PreviewFile) {
+            $bytes = ConvertTo-CHBytes $answer
+            if ($bytes.Length -gt 4194304) { throw 'Session choices exceed the transfer limit. Use a folder or session ID with the standalone tool.' }
+            $previewRoot = Assert-CHPath (Join-Path $bridgeRoot 'mod-previews') $bridgeRoot
+            Protect-CHDirectory $previewRoot
+            $key = if ($request.Session) { $request.Session } else { $context.Signature }
+            $path = Assert-CHPath (Join-Path $previewRoot ((Get-CHHash (ConvertTo-CHBytes ('choices:' + $key))) + '.json')) $previewRoot
+            Write-CHAtomic $path $bytes
+            $answer = [ordered]@{Ok=$true; Action='Choices'; PreviewPath=$path; PreviewBytes=$bytes.Length; ConfigPath=$bridgeConfig}
+        }
+    }
     elseif ($request.Action -eq 'Plan') {
         $context = Get-CHConfig $bridgeConfig $request.Source $request.Target
         Assert-SessionSource $context
-        $syncPlan = New-CHPlan -Context $context -Direction AtoB
+        $syncPlan = New-CHPlan -Context $context -Direction AtoB -Scope $request.Scope -ScopeFolder $request.ScopeFolder -ScopeSession $request.ScopeSession
         $answer = [ordered]@{Ok=$true; Action='Plan'; Writes=$syncPlan.Operations.Count;
+            Scope=$syncPlan.Scope;
             Additions=@($syncPlan.Report | Where-Object Action -eq 'Add').Count;
             Updates=@($syncPlan.Report | Where-Object Action -eq 'Update').Count;
             Conflicts=@($syncPlan.Report | Where-Object Action -eq 'Conflict').Count;
@@ -122,14 +142,15 @@ try {
                 Assert-SessionSource $context
                 $sourceId = $context.Config.Profiles[0].Name
                 $targetId = $context.Config.Profiles[1].Name
+                $scopeKey = Get-CHHash (ConvertTo-CHBytes @($request.Scope, $request.ScopeFolder, $request.ScopeSession))
                 if ($lease -and -not $ownsLease -and [datetime]::Parse($lease.ExpiresUtc).ToUniversalTime() -gt [datetime]::UtcNow) {
                     throw 'Auto-sync is controlled by another session. Pause it there or wait three minutes after it ends.'
                 }
                 if ($request.Action -eq 'Sync' -and $request.KeepLease -and
-                    (-not $ownsLease -or $lease.Source -ne $sourceId -or $lease.Target -ne $targetId)) {
-                    throw 'Auto-sync must be armed for this source and destination before writing.'
+                    (-not $ownsLease -or $lease.Source -ne $sourceId -or $lease.Target -ne $targetId -or $lease.Scope -ne $scopeKey)) {
+                    throw 'Auto-sync must be armed for this source, destination and scope before writing.'
                 }
-                $nextLease = @{Owner=$request.Owner; Source=$sourceId; Target=$targetId; ExpiresUtc=[datetime]::UtcNow.AddMinutes(3).ToString('o')}
+                $nextLease = @{Owner=$request.Owner; Source=$sourceId; Target=$targetId; Scope=$scopeKey; ExpiresUtc=[datetime]::UtcNow.AddMinutes(3).ToString('o')}
                 Write-CHAtomic $leasePath (ConvertTo-CHBytes $nextLease)
                 if ($request.Action -eq 'Arm') {
                     $answer = [ordered]@{Ok=$true; Action='Arm'; Source=$sourceId; Target=$targetId}
@@ -137,10 +158,11 @@ try {
                 else {
                     try {
                         # Recalculate immediately before writing; never apply a UI preview.
-                        $syncPlan = New-CHPlan -Context $context -Direction AtoB
+                        $syncPlan = New-CHPlan -Context $context -Direction AtoB -Scope $request.Scope -ScopeFolder $request.ScopeFolder -ScopeSession $request.ScopeSession
                         Invoke-CHApply -Context $context -Plan $syncPlan -AllowRunning $true -ActiveProfile $sourceId | ForEach-Object { $messageBuffer.Add($_) }
                         $backupLine = @($messageBuffer | Where-Object { $_ -is [string] -and $_.StartsWith('Backup: ') } | Select-Object -First 1)
                         $answer = [ordered]@{Ok=$true; Action='Sync'; Writes=$syncPlan.Operations.Count;
+                            Scope=$syncPlan.Scope;
                             Additions=@($syncPlan.Report | Where-Object Action -eq 'Add').Count;
                             Updates=@($syncPlan.Report | Where-Object Action -eq 'Update').Count;
                             Conflicts=@($syncPlan.Report | Where-Object Action -eq 'Conflict').Count;

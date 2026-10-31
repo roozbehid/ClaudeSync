@@ -24,16 +24,22 @@ const adapter = {
     await new Promise(resolve=>setTimeout(resolve, 350));
     const result = {Ok:true, Action:action};
     if(action==='Profiles') Object.assign(result,{Profiles:profiles, CurrentProfile:ambiguous?'':A, SessionProfiles:ambiguous?[A,B]:[A]});
-    if(action==='Plan') Object.assign(result,{Additions:1, Updates:1, Conflicts:1,Skipped:1,Report:[],Rows:[
+    const fixtureRows=[
       {File:'local_fixture.json',Title:'New project ideas',Action:'Add',Before:null,After:{Title:'New project ideas',Archived:false},Detail:'Saved session card'},
       {File:'local_archive.json',Title:'Release planning',Action:'Update',Before:{Title:'Old release plan',Archived:false},After:{Title:'Release planning',Archived:true},Detail:'Rename and archive',ChangedFields:['title','isArchived']},
       {File:'local_conflict.json',Title:'Account configuration',Action:'Conflict',Before:{Title:'Existing account setup',Archived:false},After:{Title:'Existing account setup',Archived:false},Detail:'CLI identities differ'},
       {File:'local_pending.json',Title:'Unfinished startup',Action:'Skipped',Before:null,After:null,Detail:'CLI session has not started'},
       {File:'local_matching.json',Title:'Documentation review',Action:'Unchanged',Before:{Title:'Documentation review',Archived:true},After:{Title:'Documentation review',Archived:true},Detail:'Already matches'},
-    ]});
+    ].map((row,index)=>({...row,File:'local_'+['aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa','bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb','cccccccc-cccc-4ccc-8ccc-cccccccccccc','dddddddd-dddd-4ddd-8ddd-dddddddddddd','eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee'][index]+'.json',Folder:index<3?'C:\\Projects\\VRGame':'C:\\Projects\\Other'}));
+    if(action==='Choices')Object.assign(result,{Folders:[{Path:'C:\\Projects\\VRGame',Count:3},{Path:'C:\\Projects\\Other',Count:2}],Sessions:fixtureRows.map(row=>({Id:row.File.slice(0,-5),Title:row.Title,Folder:row.Folder}))});
+    const scope=argv.includes('-Scope')?argv[argv.indexOf('-Scope')+1]:'All';
+    const folder=argv.includes('-ScopeFolder')?argv[argv.indexOf('-ScopeFolder')+1]:'';
+    const session=argv.includes('-ScopeSession')?argv[argv.indexOf('-ScopeSession')+1]:'';
+    const rows=fixtureRows.filter(row=>scope==='All'||(scope==='Folder'?row.Folder===folder:row.File===session+'.json'));
+    if(action==='Plan') Object.assign(result,{Additions:rows.filter(r=>r.Action==='Add').length,Updates:rows.filter(r=>r.Action==='Update').length,Conflicts:rows.filter(r=>r.Action==='Conflict').length,Skipped:rows.filter(r=>r.Action==='Skipped').length,Report:[],Rows:rows,Scope:{Mode:scope,Count:rows.length}});
     if(action==='Sync') {
       copies++;
-      Object.assign(result,{Additions:1, Updates:1, Backup:'C:/FixtureBackups/receipt-'+copies});
+      Object.assign(result,{Additions:rows.filter(r=>r.Action==='Add').length, Updates:rows.filter(r=>r.Action==='Update').length, Backup:'C:/FixtureBackups/receipt-'+copies});
       if(interrupted) Object.assign(result,{Ok:false, Error:'Simulated destination file change. Automatic sync paused.'});
     }
     return {exitCode:result.Ok?0:1, stderr:'', stdout:JSON.stringify(result)};

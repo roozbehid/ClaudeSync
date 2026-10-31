@@ -130,6 +130,33 @@ changed, timestamps cannot prove the exact time of an individual archive/title
 action. Sync-generated copies share a baseline and do not count as fresh history
 changes on the next run.
 
+## Sync one project or session tree
+
+`-Scope All` is the standalone default. To limit both Plan and Sync to a project,
+pass the same scope arguments to each command:
+
+```powershell
+.\Sync-ClaudeHistory.ps1 -Mode Plan -ProfileA $a -ProfileB $b -Scope Folder -ScopeFolder 'D:\Projects_Games\VRGame'
+.\Sync-ClaudeHistory.ps1 -Mode Sync -ProfileA $a -ProfileB $b -Scope Folder -ScopeFolder 'D:\Projects_Games\VRGame'
+```
+
+Folder scope uses each source card's `originCwd`, falling back to `cwd`. It includes
+subfolders and all descendants of matching sessions, even when they run in other
+worktrees. It does not match similarly named sibling folders such as `VRGame-old`.
+Use the full folder path; selecting a folder does not copy project files.
+
+For one session, use `-Scope Session -ScopeSession 'local_DESKTOP_SESSION_GUID'`.
+The ID is the Desktop card ID, not its current CLI transcript ID. All descendants
+are included automatically. A leaf is synced alone. Ancestors are not implicitly
+imported: if a selected child needs a parent missing from the destination, it is
+skipped with a reason. Select its parent tree to import that parent as well.
+
+Folder and Session scopes require a one-way direction. Unselected cards and their
+baseline entries stay untouched; archive-index updates preserve unrelated entries.
+Backups record the scope. An empty or stale selection fails instead of widening
+to all history. Live sync still requires an inactive destination; the source can
+remain open with `-AllowRunning -ActiveProfile` as described in the live-sync section.
+
 ## Archive and unarchive
 
 **Both count as changes.** After establishing the common baseline, archive a
@@ -334,6 +361,7 @@ Run it using PowerShell 5.1 or 7:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Test-SyncClaudeHistory.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Test-SyncScopes.ps1
 ```
 
 If the workspace drive does not allow private folder ACLs, use

@@ -14,7 +14,7 @@ function mode(view) {
 }
 
 function samePair(view, result) {
-  return result && result.source === view.source && result.target === view.target;
+  return result && result.source === view.source && result.target === view.target && (result.scopeKey || 'All') === view.scopeKey;
 }
 
 function time(at, full = false) {
@@ -69,7 +69,7 @@ export function renderBand({ Box, Text, Button }, controller, openSettings) {
       Button({ key: 'settings', label: 'Sync settings', hotkey: 's', onPress: openSettings }),
       Button({ key: 'details', label: v.expanded ? 'Less' : 'Details', onPress: () => controller.toggleDetails() }),
     ] }),
-    Text({ dimColor: true, children: `${direction}${last}` }),
+    Text({ dimColor: true, children: `${direction}${last} · ${v.scopeLabel}` }),
     ...(v.error ? [Text({ color: 'red', children: v.error })] : []),
     ...(v.busy ? [Text({ children: v.status })] : []),
     ...(v.expanded ? [
@@ -108,6 +108,7 @@ export function previewText(view) {
   return ['Preview only — no history writes performed.',
     `From: ${accountLabel(view, p.source)} | ${p.source}`,
     `To: ${accountLabel(view, p.target)} | ${p.target}`, time(p.at, true), p.message,
+    `Scope: ${p.scopeLabel || 'All history'}${Number.isInteger(p.scopeCount) ? ` · ${p.scopeCount} source sessions` : ''}`,
     `Planned operations: ${p.writes}`,
     ...(view.previewRows.length ? [previewTableText(view.previewRows)] : view.report.map(r => `${r.Action}: ${r.File}\n${r.Detail}`)),
     ...(p.reportTruncated ? [`Report limited to ${view.report.length} of ${p.reportTotal} entries.`] : []),
@@ -118,6 +119,7 @@ export function previewText(view) {
 export function diagnosticsText(view) {
   return ['History sync diagnostics', `From: ${accountLabel(view, view.source, 'Unconfirmed')} | ${view.source}`,
     `To: ${accountLabel(view, view.target)} | ${view.target}`, mode(view), view.status,
+    `Scope: ${view.scopeLabel}`,
     ...(view.error ? [`Error: ${view.error}`] : []), `Config: ${view.configPath || '(default)'}`,
     profilesText(view), ...(view.preview ? [previewText(view)] : []),
     ...(view.backup ? [`Latest backup: ${view.backup}`] : []),
@@ -177,6 +179,43 @@ function renderPreviewTable({Box,Text,Button,Select,Input}, controller, copy) {
   ];
 }
 
+function renderScope({Text,Button,Select,Input}, controller) {
+  const v = controller.view;
+  const query = v.scopeSearch.trim().toLocaleLowerCase();
+  const matches = v.scopeSessions.filter(s => !query || `${s.Title} ${s.Folder}`.toLocaleLowerCase().includes(query));
+  const sessions = matches.slice(0, 100);
+  const selected = v.scopeSessions.find(s => s.Id === v.scopeSession);
+  if (selected && !sessions.some(s => s.Id === selected.Id)) {
+    if (sessions.length === 100) sessions.pop();
+    sessions.unshift(selected);
+  }
+  return [
+    Text({bold:true,children:'Choose what to sync'}),
+    Select({key:'sync-scope',label:'Sync scope',value:v.scopeMode,
+      options:[{value:'All',label:'All history'},{value:'Folder',label:'Folder and its session trees'},{value:'Session',label:'One session and its descendants'}],
+      onSelect:mode=>controller.chooseScope(mode)}),
+    ...(v.scopeMode !== 'All' ? [
+      Button({key:'load-scope-choices',label:v.scopeSessions.length?'Refresh folders and sessions':'Load folders and sessions',dimColor:v.busy || !v.source || !v.target,
+        onPress:()=>controller.loadChoices()}),
+      ...(v.scopeMode === 'Folder' ? [
+        Select({key:'scope-folder',label:'Source folder',value:v.scopeFolder,
+          options:[{value:'',label:'Choose folder'},...v.scopeFolders.map(f=>({value:f.Path,label:`${f.Path} · ${f.Count} sessions`}))],
+          onSelect:path=>controller.chooseScope('Folder',path)}),
+        Text({dimColor:true,children:'Uses the original project folder, including subfolders and descendant sessions in other worktrees.'}),
+      ] : [
+        ...(Input?[Input({key:'scope-search',label:'Find a session',placeholder:'Code Altar…',value:v.scopeSearch,onInput:value=>controller.searchScopes(value),onSubmit:value=>controller.searchScopes(value)})]:[]),
+        Select({key:'scope-session',label:'Source session',value:v.scopeSession,
+          options:[{value:'',label:'Choose session'},...sessions.map(s=>({value:s.Id,label:`${s.Title || 'Untitled session'} · ${s.Folder}`}))],
+          onSelect:id=>controller.chooseScope('Session',id)}),
+        Text({dimColor:true,children:`${matches.length} matching sessions. Showing up to 100; refine the search to find another session.`}),
+        Text({dimColor:true,children:'Includes this session and its descendants. A child selected on its own needs its parent already in the destination; otherwise Preview explains the skip.'}),
+      ]),
+    ] : []),
+    Text({bold:true,children:`Selected: ${v.scopeLabel}`}),
+    Text({dimColor:true,children:'Scope is remembered for this account pair. Changing scope pauses auto-sync and clears the previous preview.'}),
+  ];
+}
+
 export function renderPane({ Box, Text, Button, Select, Input }, controller, writer = async () => ({isCopied:false,reason:'no-clipboard'})) {
   const v = controller.view;
   const row = children => Box({ flexDirection: 'row', flexWrap: 'wrap', gap: 1, children });
@@ -222,6 +261,7 @@ export function renderPane({ Box, Text, Button, Select, Input }, controller, wri
     content = [
       heading('Sync'),
       Text({ children: `${accountLabel(v, v.source, 'Confirm this account')} → ${accountLabel(v, v.target)}` }),
+      ...renderScope({Text,Button,Select,Input}, controller),
       ...(!v.source || !v.target ? [note('Choose accounts before previewing or syncing.'),
         Button({ key: 'choose-accounts', label: 'Choose accounts', onPress: () => go('accounts') })] : []),
       row([action(Button, controller, 'preview', 'Preview', () => controller.preview(), true),
@@ -230,7 +270,7 @@ export function renderPane({ Box, Text, Button, Select, Input }, controller, wri
       Text({ children: mode(v) }),
       note('Checks saved history every 30 seconds and shortly after a turn finishes. Starts paused in each session.'),
       row([automatic(Button, controller)]),
-      note('Pause before switching accounts. Changing the destination pauses automatic sync.'),
+      note('The source account can stay open. Keep the destination inactive. Changing the destination or scope pauses automatic sync.'),
       heading('Results'),
       Text({ children: v.status }),
       ...(samePair(v, v.lastResult) ? [Text({ children: `${v.lastResult.message}\nLast sync: ${time(v.lastResult.at, true)}` })] : [note('No completed sync for this direction yet.')]),
@@ -246,7 +286,7 @@ export function renderPane({ Box, Text, Button, Select, Input }, controller, wri
       note('Each modifying sync backs up the destination cards and archive index. Recent backups include their original direction.'),
       ...(v.receipts.length ? v.receipts.flatMap((r, index) => [
         heading(`${index === 0 ? 'Latest backup' : 'Backup'} · ${r.status === 'prepared' ? 'Interrupted — inspect before retrying' : 'Complete'}`),
-        Text({ children: `${accountLabel(v, r.source)} → ${accountLabel(v, r.target)}\n${time(r.at, true)}\n${r.message}` }),
+        Text({ children: `${accountLabel(v, r.source)} → ${accountLabel(v, r.target)}\n${r.scopeLabel || 'All history'}\n${time(r.at, true)}\n${r.message}` }),
         Text({ children: r.backup }),
         copy(`copy-backup-${index}`, 'Copy backup path', () => r.backup),
       ]) : [note('No backup recorded yet. A preview or sync with no changes creates no backup.')]),
