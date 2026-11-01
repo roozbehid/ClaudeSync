@@ -86,6 +86,7 @@ function createController() {
   async function chooseScope(mode, selection = '') {
     if (!['All', 'Folder', 'Session'].includes(mode)) throw new Error('Choose All history, Folder, or Session.');
     await pause();
+    if (mode !== view.scopeMode) view.scopeSearch = '';
     setScope(mode, selection);
     if (view.source && view.target) {
       scopeSelections[JSON.stringify([view.source,view.target])] = {mode,selection,label:view.scopeLabel};
@@ -548,16 +549,25 @@ function renderPreviewTable({Box,Text,Button,Select,Input}, controller, copy) {
   ];
 }
 
+// Native Select permits 64 options including the placeholder. Keep the saved
+// choice reachable even when it is outside the search results or first page.
+function pickerChoices(items, allItems, selectedValue, valueOf) {
+  const shown = items.slice(0, 63);
+  const selected = allItems.find(item => valueOf(item) === selectedValue);
+  if (selected && !shown.some(item => valueOf(item) === selectedValue)) {
+    if (shown.length === 63) shown.pop();
+    shown.unshift(selected);
+  }
+  return shown;
+}
+
 function renderScope({Text,Button,Select,Input}, controller) {
   const v = controller.view;
   const query = v.scopeSearch.trim().toLocaleLowerCase();
   const matches = v.scopeSessions.filter(s => !query || `${s.Title} ${s.Folder}`.toLocaleLowerCase().includes(query));
-  const sessions = matches.slice(0, 100);
-  const selected = v.scopeSessions.find(s => s.Id === v.scopeSession);
-  if (selected && !sessions.some(s => s.Id === selected.Id)) {
-    if (sessions.length === 100) sessions.pop();
-    sessions.unshift(selected);
-  }
+  const sessions = pickerChoices(matches, v.scopeSessions, v.scopeSession, s => s.Id);
+  const matchingFolders = v.scopeFolders.filter(f => !query || f.Path.toLocaleLowerCase().includes(query));
+  const folders = pickerChoices(matchingFolders, v.scopeFolders, v.scopeFolder, f => f.Path);
   return [
     Text({bold:true,children:'Choose what to sync'}),
     Select({key:'sync-scope',label:'Sync scope',value:v.scopeMode,
@@ -567,16 +577,18 @@ function renderScope({Text,Button,Select,Input}, controller) {
       Button({key:'load-scope-choices',label:v.scopeSessions.length?'Refresh folders and sessions':'Load folders and sessions',dimColor:v.busy || !v.source || !v.target,
         onPress:()=>controller.loadChoices()}),
       ...(v.scopeMode === 'Folder' ? [
+        ...(Input?[Input({key:'scope-folder-search',label:'Find a folder',placeholder:'Folder name…',value:v.scopeSearch,onInput:value=>controller.searchScopes(value),onSubmit:value=>controller.searchScopes(value)})]:[]),
         Select({key:'scope-folder',label:'Source folder',value:v.scopeFolder,
-          options:[{value:'',label:'Choose folder'},...v.scopeFolders.map(f=>({value:f.Path,label:`${f.Path} · ${f.Count} sessions`}))],
+          options:[{value:'',label:'Choose folder'},...folders.map(f=>({value:f.Path,label:`${f.Path} · ${f.Count} sessions`}))],
           onSelect:path=>controller.chooseScope('Folder',path)}),
+        Text({dimColor:true,children:`${matchingFolders.length} matching folders. Showing up to 63; search to find another folder.`}),
         Text({dimColor:true,children:'Uses the original project folder, including subfolders and descendant sessions in other worktrees.'}),
       ] : [
         ...(Input?[Input({key:'scope-search',label:'Find a session',placeholder:'Session title…',value:v.scopeSearch,onInput:value=>controller.searchScopes(value),onSubmit:value=>controller.searchScopes(value)})]:[]),
         Select({key:'scope-session',label:'Source session',value:v.scopeSession,
           options:[{value:'',label:'Choose session'},...sessions.map(s=>({value:s.Id,label:`${s.Title || 'Untitled session'} · ${s.Folder}`}))],
           onSelect:id=>controller.chooseScope('Session',id)}),
-        Text({dimColor:true,children:`${matches.length} matching sessions. Showing up to 100; refine the search to find another session.`}),
+        Text({dimColor:true,children:`${matches.length} matching sessions. Showing up to 63; search to find another session.`}),
         Text({dimColor:true,children:'Includes this session and its descendants. A child selected on its own needs its parent already in the destination; otherwise Preview explains the skip.'}),
       ]),
     ] : []),

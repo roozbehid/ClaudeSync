@@ -1,5 +1,46 @@
 import { test, expect, mock } from 'claude-code/testing';
 
+for (const surface of ['terminal','desktop'] as const) {
+  test(`folder choices keep the pane mounted after loading a large catalog on ${surface}`,async($,on)=>{
+    mock.store(on);mock.env(on,{OS:'Windows_NT'});mock.clock(on);
+    const a='11111111-1111-4111-8111-111111111111\\22222222-2222-4222-8222-222222222222';
+    const b='33333333-3333-4333-8333-333333333333\\44444444-4444-4444-8444-444444444444';
+    const folders=Array.from({length:64},(_,i)=>({Path:`C:\\Projects\\Folder-${i}-${'x'.repeat(90)}`,Count:16}));
+    const sessions=Array.from({length:1002},(_,i)=>({Id:`local_00000000-0000-4000-8000-${i.toString(16).padStart(12,'0')}`,Title:`Session ${i}`,Folder:folders[i%folders.length].Path}));
+    const snapshot=JSON.stringify({Ok:true,Action:'Choices',Folders:folders,Sessions:sessions});
+    on('fs.read',()=>({value:snapshot}));
+    on('session.id',()=>({value:'test-owner'}));
+    on('session.start',($,e)=>({cwd:e.cwd}));
+    on('command.register',()=>({value:undefined}));
+    on('process.run',($,e)=>{
+      const action=e.argv[e.argv.indexOf('-Action')+1];
+      const result=action==='Profiles'?{Ok:true,Action:action,Profiles:[{Id:a,Label:'A'},{Id:b,Label:'B'}],CurrentProfile:a,SessionProfiles:[a]}:
+        action==='Choices'?{Ok:true,Action:action,PreviewPath:'C:/private/choices.json',PreviewBytes:snapshot.length}:{Ok:true,Action:action};
+      return{value:{exitCode:0,stdout:JSON.stringify(result),stderr:'',isStdoutTruncated:false,isStderrTruncated:false}};
+    });
+    await $.session.start({cwd:'C:/fixture',surface,isInteractive:true});
+    await $.command.run({command:'history-sync',args:`to ${b}`,origin:{kind:'unclassified'},presentation:{isFullscreen:false,columns:100}});
+    const pane=await $.ui.mount({plugin:'account-history-sync',surface,component:'Pane',requestId:'history-sync',props:{title:'History sync',isFocused:true,bodyColumns:100,placement:'dock',scroll:{offset:0,bodyRows:40},view:{}}});
+    await pane.press({key:'nav-sync'});
+    await pane.select({key:'sync-scope',value:'Folder'});
+    await pane.press({key:'load-scope-choices'});
+    expect(await pane.find({type:'Text',text:'Loaded 64 folders and 1002 source sessions.'})).toBeDefined();
+    expect(await pane.find({key:'scope-folder'})).toBeDefined();
+    await pane.select({key:'scope-folder',value:folders[0].Path});
+    expect(await pane.find({type:'Text',text:`Selected: Folder: ${folders[0].Path}`})).toBeDefined();
+    await pane.input({key:'scope-folder-search',text:'Folder-63-',kind:'change'});
+    await pane.select({key:'scope-folder',value:folders[63].Path});
+    expect(await pane.find({type:'Text',text:`Selected: Folder: ${folders[63].Path}`})).toBeDefined();
+    await pane.input({key:'scope-folder-search',text:'no matching folder',kind:'change'});
+    expect(await pane.find({key:'scope-folder'})).toBeDefined();
+    await pane.select({key:'sync-scope',value:'Session'});
+    expect(await pane.find({type:'Text',text:'1002 matching sessions.'})).toBeDefined();
+    await pane.input({key:'scope-search',text:'Session 999',kind:'change'});
+    await pane.select({key:'scope-session',value:sessions[999].Id});
+    expect(await pane.find({type:'Text',text:'Selected: Session: Session 999 and descendants'})).toBeDefined();
+  });
+}
+
 test('status command loads without starting sync', async ($, on) => {
   mock.store(on);
   mock.env(on, { OS: 'Windows_NT' });

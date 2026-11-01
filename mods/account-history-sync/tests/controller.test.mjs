@@ -167,6 +167,30 @@ test('scope selectors and session search operate through the sync pane', async (
   assert.match(textContent(renderPane(elements,h.c,async()=>({isCopied:true}))),/parent already in the destination/);
 });
 
+test('native picker limits include placeholders and retain selections outside the search window', async () => {
+  const h=await ready();h.c.showSection('sync');
+  h.c.view.scopeFolders=Array.from({length:64},(_,i)=>({Path:`D:\\Folder-${i}`,Count:1}));
+  h.c.view.scopeSessions=Array.from({length:1002},(_,i)=>({Id:`local_00000000-0000-4000-8000-${i.toString(16).padStart(12,'0')}`,Title:`Session ${i}`,Folder:`D:\\Folder-${i%64}`}));
+  await h.c.chooseScope('Folder',h.c.view.scopeFolders[63].Path);
+  let pane=renderPane(elements,h.c);
+  let picker=control(pane,'scope-folder');
+  assert.equal(picker.options.length,64);
+  assert.ok(picker.options.some(option=>option.value===h.c.view.scopeFolder));
+  control(pane,'scope-folder-search').onInput('Folder-62');
+  picker=control(renderPane(elements,h.c),'scope-folder');
+  assert.equal(picker.options.length,3); // placeholder, search result, saved choice
+  assert.ok(picker.options.some(option=>option.value==='D:\\Folder-62'));
+  await h.c.chooseScope('Session',h.c.view.scopeSessions[1001].Id);
+  assert.equal(h.c.view.scopeSearch,'');
+  pane=renderPane(elements,h.c);picker=control(pane,'scope-session');
+  assert.equal(picker.options.length,64);
+  assert.ok(picker.options.some(option=>option.value===h.c.view.scopeSession));
+  control(pane,'scope-search').onInput('Session 999');
+  picker=control(renderPane(elements,h.c),'scope-session');
+  assert.ok(picker.options.some(option=>option.value===h.c.view.scopeSessions[999].Id));
+  assert.ok(picker.options.some(option=>option.value===h.c.view.scopeSession));
+});
+
 test('large-history preview and sync get ten minutes while control calls stay bounded', async () => {
   const { c, calls } = await ready();
   await c.preview();

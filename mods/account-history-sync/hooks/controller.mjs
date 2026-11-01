@@ -67,6 +67,7 @@ export function createController() {
   async function chooseScope(mode, selection = '') {
     if (!['All', 'Folder', 'Session'].includes(mode)) throw new Error('Choose All history, Folder, or Session.');
     await pause();
+    if (mode !== view.scopeMode) view.scopeSearch = '';
     setScope(mode, selection);
     if (view.source && view.target) {
       scopeSelections[JSON.stringify([view.source,view.target])] = {mode,selection,label:view.scopeLabel};

@@ -272,7 +272,9 @@ additions. Destination-only cards are left alone during one-way sync.
 In **Sync**, set **Sync scope** to **Folder and its session trees** or **One session
 and its descendants**, then select **Load folders and sessions**. Folder choices
 show full original project paths and counts. For SampleProject, choose
-`C:\Projects\SampleProject`. The session picker can search by title or folder.
+`C:\Projects\SampleProject`. Search folders by path, or sessions by title or folder.
+Each picker shows up to 63 choices at once; search to reach the rest. Your current
+selection stays available even when it is outside the search results.
 
 Folder scope includes subfolders and descendants in other worktrees. Session
 scope includes only the chosen session and its descendants; a leaf syncs alone.
