@@ -53,11 +53,16 @@ The official API does not offer a global Desktop toolbar slot; the DOM experimen
 adds its own controls to the page. Claude controls
 where the band and pane are placed.
 
-The menu has three sections:
+The menu has four sections:
 
 - **Accounts**: confirm the source if needed and choose the inactive destination.
 - **Sync**: preview changes, sync once, and start or pause automation.
 - **Backups**: review recent backup paths, original directions, and interrupted copies.
+- **Codex import**: choose any locally available Claude account and a folder or
+  parent session, preview the exact saved snapshot, then import Ready sessions into
+  local Codex history. Children are included. This is manual and pauses Claude
+  auto-sync; it never starts automatic Codex imports. Requires Node.js 22+ and a
+  compatible Codex CLI. See the [import guide](../../docs/claude-to-codex.md).
 
 ## Before and after preview
 

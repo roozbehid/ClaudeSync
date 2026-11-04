@@ -3,6 +3,8 @@ import { readFile, writeFile } from 'node:fs/promises';
 const root = new URL('../', import.meta.url);
 const controller = await readFile(new URL('mods/account-history-sync/hooks/controller.mjs', root), 'utf8');
 const ui = await readFile(new URL('mods/account-history-sync/hooks/ui.mjs', root), 'utf8');
+const codexController = await readFile(new URL('mods/account-history-sync/hooks/codex-controller.mjs', root), 'utf8');
+const codexUi = await readFile(new URL('mods/account-history-sync/hooks/codex-ui.mjs', root), 'utf8');
 const domLaunchers = await readFile(new URL('experiments/dom-launchers/renderer.js', root), 'utf8');
 const runtime = String.raw`
 const A = '11111111-1111-4111-8111-111111111111\\22222222-2222-4222-8222-222222222222';
@@ -12,12 +14,14 @@ const profiles = [
   {Id:B, Email:'other@example.test', OrganizationId:B.split('\\')[1], Sessions:4},
 ];
 let c, paneOpen = false, copies = 0, interrupted = false, ambiguous = false;
+const codexFiles=new Map(),codexPlans=new Map();let codexToken=0;
 const saved = new Map([['destination', B]]), log = [];
 const noopTimer = () => ({cancel(){}});
 const adapter = {
   root:'Fixture only', windows:true, sessionId:async()=> 'preview', envGet:async()=> '',
   now:async()=>Date.now(), storeGet:async key=>saved.get(key), storeSet:async(key,value)=>saved.set(key,value),
   redraw:()=>queueMicrotask(draw), log:()=>{}, every:noopTimer, after:noopTimer,
+  readText:async path=>codexFiles.get(path),
   processRun:async argv=> {
     const action = argv[argv.indexOf('-Action')+1];
     log.unshift(action); draw();
@@ -31,6 +35,24 @@ const adapter = {
       {File:'local_pending.json',Title:'Unfinished startup',Action:'Skipped',Before:null,After:null,Detail:'CLI session has not started'},
       {File:'local_matching.json',Title:'Documentation review',Action:'Unchanged',Before:{Title:'Documentation review',Archived:true},After:{Title:'Documentation review',Archived:true},Detail:'Already matches'},
     ].map((row,index)=>({...row,File:'local_'+['aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa','bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb','cccccccc-cccc-4ccc-8ccc-cccccccccccc','dddddddd-dddd-4ddd-8ddd-dddddddddddd','eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee'][index]+'.json',Folder:index<3?'C:\\Projects\\SampleProject':'C:\\Projects\\Other'}));
+    if(argv.some(arg=>arg.includes('ClaudeCodex-Bridge.ps1'))){
+      const value=flag=>argv.includes(flag)?argv[argv.indexOf(flag)+1]:'';
+      let data={action};
+      if(action==='Profiles')data.profiles=profiles;
+      if(action==='Choices'){data.folders=[{Path:'C:\\Projects\\SampleProject',Count:3},{Path:'C:\\Projects\\Other',Count:2}];data.sessions=fixtureRows.map(r=>({Id:r.File.slice(0,-5),Title:r.Title,Folder:r.Folder}));}
+      if(action==='Plan'){
+        const rows=fixtureRows.filter((r,i)=>value('-Scope')==='Folder'?r.Folder===value('-ScopeFolder'):r.File===value('-ScopeSession')+'.json'||value('-ScopeSession')===fixtureRows[0].File.slice(0,-5)&&i===1);
+        data={...data,planPath:'C:/Private/codex-imports/fixture/plans/'+(++codexToken)+'.json',codexHome:value('-CodexHome')||'C:/Example User/.codex',rows:rows.map(r=>({id:r.File.slice(0,-5),title:r.Title,status:({Add:'Ready',Update:argv.includes('-NewRevision')?'Ready':'Changed',Conflict:'Skipped',Skipped:'Skipped',Unchanged:'Unchanged'})[r.Action],reason:r.Detail,messages:35,archived:r.After?.Archived||false,cwd:value('-DestinationFolder')||r.Folder,warnings:r.Action==='Add'?['2 images are preserved as linked local attachments.']:[]}))};
+        codexPlans.set(data.planPath,data);
+      }
+      if(action==='Resume'||action==='Import'){
+        const prior=codexPlans.get(value('-PlanPath'));
+        if(!prior)return{exitCode:1,stdout:JSON.stringify({Ok:false,Error:'Saved fixture preview unavailable. Preview again.'})};
+        data={...prior,action,rows:prior.rows.map(r=>({...r,status:action==='Import'&&r.status==='Ready'?'Imported':r.status,target:action==='Import'&&r.status==='Ready'?'fixture-codex-thread':undefined})),receiptPath:action==='Import'?'C:/Private/import-receipt.json':undefined};
+      }
+      const text=JSON.stringify(data),file='C:/Private/codex-result-'+(++codexToken)+'.json';codexFiles.set(file,text);
+      return{exitCode:0,stdout:JSON.stringify({Ok:true,Action:action,ResultPath:file,ResultBytes:text.length}),stderr:''};
+    }
     if(action==='Choices')Object.assign(result,{Folders:[{Path:'C:\\Projects\\SampleProject',Count:3},{Path:'C:\\Projects\\Other',Count:2}],Sessions:fixtureRows.map(row=>({Id:row.File.slice(0,-5),Title:row.Title,Folder:row.Folder}))});
     const scope=argv.includes('-Scope')?argv[argv.indexOf('-Scope')+1]:'All';
     const folder=argv.includes('-ScopeFolder')?argv[argv.indexOf('-ScopeFolder')+1]:'';
@@ -119,7 +141,7 @@ button,select{font:inherit;border:1px solid #d6d3ca;background:#fcfbf8;border-ra
 .stage{margin-top:24px;border:1px solid #d6d3ca;border-radius:12px;background:#fcfbf8;padding:20px}.conversation{height:160px;display:grid;place-items:center;color:#95938a}.prompt{margin-top:14px;padding:20px;border:1px solid #d6d3ca;border-radius:10px;color:#8b897e}.tools{display:flex;flex-wrap:wrap;align-items:center;gap:18px;margin:24px 0;font-size:13px}.tools label{display:flex;gap:6px;align-items:center}
 .picker{display:flex;flex-direction:column;gap:5px}.picker select{width:100%}#menu{margin-top:20px;border:1px solid #d6d3ca;border-radius:10px;background:white;padding:12px}#menu[hidden]{display:none}.menu-top{display:flex;justify-content:space-between;align-items:center;padding:0 8px 8px;border-bottom:1px solid #e6e4dc;margin-bottom:8px;font-size:12px;color:#74736d}code{font-size:12px;overflow-wrap:anywhere}header{display:flex;align-items:center;flex-wrap:wrap;gap:12px}aside{border:1px dashed #c5c0b4;border-radius:8px;padding:10px;margin:16px 0}.footer{display:flex;flex-wrap:wrap;align-items:center;gap:12px;padding-top:8px}
 </style>
-<header><span class="badge">Version 0.5.0 · UI comparison</span><h1>History sync</h1></header>
+<header><span class="badge">Version 0.6.0 · UI comparison</span><h1>History sync and Codex import</h1></header>
 <p>Compare three native locations and three DOM launchers. This preview uses the production controller and both UI implementations with fixture accounts. Every operation is simulated; it cannot read or change account files.</p>
 <p class="muted">Claude supplies the final styling and pane placement. This is a layout and interaction preview. Automatic timers are disabled here; Start performs one simulated copy.</p>
 <aside aria-label="Sidebar">Example Desktop sidebar</aside>
@@ -127,6 +149,6 @@ button,select{font:inherit;border:1px solid #d6d3ca;background:#fcfbf8;border-ra
 <div class="tools"><button id="reload">Simulate session reload</button><button id="remove-dom">Remove DOM launchers</button><label><input id="failure" type="checkbox">Simulate copy failure</label><label><input id="ambiguous" type="checkbox">Session found in both accounts</label></div>
 <p class="muted">Simulated helper operations: <code id="operations"></code></p><p id="preview-error" class="error"></p>
 <textarea id="copy-output" hidden readonly aria-label="Selectable copy text" style="width:100%;height:160px"></textarea>
-<script type="module">${controller.replaceAll('export ', '')}\n${ui.replaceAll('export ', '')}\n${runtime}\n${domLaunchers}</script></html>`;
+<script type="module">${codexController.replaceAll('export ', '')}\n${codexUi.replaceAll('export ', '')}\n${controller.replace(/^import .*codex-controller.*\r?\n/m,'').replaceAll('export ', '')}\n${ui.replace(/^import .*codex-ui.*\r?\n/m,'').replaceAll('export ', '')}\n${runtime}\n${domLaunchers}</script></html>`;
 await writeFile(new URL('docs/history-sync-preview.html', root), html);
 console.log('Built docs/history-sync-preview.html with fixture-only operations.');

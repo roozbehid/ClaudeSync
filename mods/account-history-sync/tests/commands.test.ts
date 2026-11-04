@@ -1,5 +1,48 @@
 import { test, expect, mock } from 'claude-code/testing';
 
+for(const surface of ['terminal','desktop'] as const){
+  test(`Codex import selects an independent source, previews a parent and imports once on ${surface}`,async($,on)=>{
+    mock.store(on);mock.env(on,{OS:'Windows_NT'});mock.clock(on);
+    const a='11111111-1111-4111-8111-111111111111\\22222222-2222-4222-8222-222222222222',b='33333333-3333-4333-8333-333333333333\\44444444-4444-4444-8444-444444444444';
+    const profiles=[{Id:a,Email:'one@example.test'},{Id:b,Email:'two@example.test'}];
+    const sessions=Array.from({length:1002},(_,i)=>({Id:`local_00000000-0000-4000-8000-${i.toString(16).padStart(12,'0')}`,Title:`Session ${i}`,Folder:'C:\\Projects\\Sample'}));
+    const snapshots=new Map<string,string>();let imports=0,token=0;
+    on('fs.read',($,e)=>({value:snapshots.get(e.path.replaceAll('\\','/'))!}));
+    on('session.id',()=>({value:'test-owner'}));on('session.start',($,e)=>({cwd:e.cwd}));on('command.register',()=>({value:undefined}));
+    on('process.run',($,e)=>{
+      const action=e.argv[e.argv.indexOf('-Action')+1];
+      if(!e.argv.some(arg=>arg.includes('ClaudeCodex-Bridge.ps1')))return{value:{exitCode:0,stdout:JSON.stringify({Ok:true,Action:action,Profiles:profiles,CurrentProfile:a,SessionProfiles:[a]}),stderr:'',isStdoutTruncated:false,isStderrTruncated:false}};
+      const source=e.argv[e.argv.indexOf('-SourceProfile')+1];
+      if(action!=='Profiles')expect(source).toBe(b);
+      const selected=e.argv[e.argv.indexOf('-ScopeSession')+1];
+      const data:any={action};
+      if(action==='Profiles')data.profiles=profiles;
+      if(action==='Choices'){data.folders=[{Path:'C:\\Projects\\Sample',Count:1002}];data.sessions=sessions;}
+      if(action==='Plan'||action==='Import'||action==='Resume'){
+        data.planPath='C:/Private/codex-imports/sample/plans/preview.json';data.codexHome='C:/User/.codex';
+        data.rows=[{id:selected,title:'Selected parent',status:action==='Import'?'Imported':'Ready',messages:12,archived:false,cwd:'C:/Projects/Sample',reason:'Synthetic history',warnings:['10 images are linked local files.']}];
+      }
+      if(action==='Import'){imports++;data.receiptPath='C:/Private/receipt.json';}
+      const text=JSON.stringify(data),path=`C:/Private/codex-result-${++token}.json`;snapshots.set(path,text);
+      return{value:{exitCode:0,stdout:JSON.stringify({Ok:true,Action:action,ResultPath:path,ResultBytes:text.length}),stderr:'',isStdoutTruncated:false,isStderrTruncated:false}};
+    });
+    await $.session.start({cwd:'C:/fixture',surface,isInteractive:true});
+    const pane=await $.ui.mount({plugin:'account-history-sync',surface,component:'Pane',requestId:'history-sync',props:{title:'History sync',isFocused:true,bodyColumns:100,placement:'dock',scroll:{offset:0,bodyRows:40},view:{}}});
+    await pane.press({key:'nav-codex'});await pane.select({key:'codex-source',value:b});await pane.press({key:'codex-choices'});
+    if(!await pane.find({type:'Text',text:'Loaded 1 folders and 1002 sessions.'}))throw new Error('Codex choices did not load');
+    await pane.select({key:'codex-scope',value:'Session'});await pane.input({key:'codex-choice-search',text:'Session 999',kind:'change'});await pane.select({key:'codex-selection',value:sessions[999].Id});
+    await pane.press({key:'codex-import'});expect(imports).toBe(0);
+    await pane.press({key:'codex-preview'});if(!await pane.find({type:'Text',text:'Preview ready. Review the sessions before importing.'}))throw new Error('Codex preview did not load');
+    await pane.press({key:`codex-detail-${sessions[999].Id}`});expect(await pane.find({type:'Text',text:'10 images are linked local files.'})).toBeDefined();
+    await pane.input({key:'codex-destinationFolder',text:'D:\\Mapped',kind:'change'});await pane.press({key:'codex-import'});expect(imports).toBe(0);
+    await pane.press({key:'codex-preview'});await pane.press({key:'codex-import'});expect(imports).toBe(1);await pane.press({key:'codex-import'});expect(imports).toBe(1);
+    expect(await pane.find({type:'Text',text:'Import results'})).toBeDefined();
+    await pane.select({key:'codex-source',value:a});await pane.press({key:'codex-resume'});
+    expect(await pane.find({type:'Text',text:'Saved preview loaded. Import will recheck source files and reconcile earlier attempts.'})).toBeDefined();
+    expect(await pane.find({key:'codex-selection'})).toBeDefined();expect(imports).toBe(1);
+  });
+}
+
 for (const surface of ['terminal','desktop'] as const) {
   test(`folder choices keep the pane mounted after loading a large catalog on ${surface}`,async($,on)=>{
     mock.store(on);mock.env(on,{OS:'Windows_NT'});mock.clock(on);

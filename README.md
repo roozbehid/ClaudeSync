@@ -114,7 +114,8 @@ experimental way to compare sidebar, header, and floating controls.
 
 ## Claude → Codex imports
 
-The standalone [Claude → Codex importer](docs/claude-to-codex.md) previews a
+The **Codex import** tab in History sync (`/history-sync codex`) and the
+standalone [Claude → Codex importer](docs/claude-to-codex.md) preview a
 selected folder or session tree, then creates new Codex conversation snapshots
 using Codex's native import API. Titles, archive state, text, and readable tool
 records transfer. Unchanged revisions are skipped; changed revisions require an
@@ -126,8 +127,11 @@ explicit new snapshot. Node.js and a compatible Codex CLI are required.
     -Scope Folder -ScopeFolder 'C:\Projects\SampleProject'
 ```
 
-Review the saved plan before importing. This initial feature is standalone;
-the in-app mod continues to handle Claude account-to-account sync.
+In the pane, choose a Claude account, load its folders and sessions, select a
+folder or parent session, then **Preview changes** and **Import**. Descendants
+are included. Preview shows skips, warnings, archive state and message counts.
+Changing the selection invalidates the preview; import uses that saved snapshot.
+Node.js 22+ and a compatible local Codex CLI are required for either entry point.
 
 ## Undo
 

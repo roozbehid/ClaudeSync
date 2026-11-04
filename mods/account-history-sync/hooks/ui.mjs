@@ -1,3 +1,4 @@
+import {renderCodexPane,codexDiagnosticsText} from './codex-ui.mjs';
 export function accountLabel(view, id, empty = 'Choose destination') {
   if (!id) return empty;
   const profile = view.profiles.find(p => p.Id === id);
@@ -291,6 +292,8 @@ export function renderPane({ Box, Text, Button, Select, Input }, controller, wri
         ...(v.previewRows.length ? renderPreviewTable({Box,Text,Button,Select,Input},controller,copy) :
           v.report.length ? [Text({children:v.report.map(r=>`${r.Action}: ${r.File}\n${r.Detail}`).join('\n').slice(0,9500)})] : [note('No sessions in this preview.')])] : []),
     ];
+  } else if (section === 'codex') {
+    content = renderCodexPane({Box,Text,Button,Select,Input},controller.codex,copy);
   } else {
     content = [
       heading('Backups'),
@@ -307,12 +310,12 @@ export function renderPane({ Box, Text, Button, Select, Input }, controller, wri
   }
   return Box({ flexDirection: 'column', gap: 1, padding: 1, children: [
     heading('History sync'),
-    copy('copy-diagnostics', 'Copy diagnostics', () => diagnosticsText(v)),
-    row(['accounts', 'sync', 'backups'].map((key, i) => Button({ key: `nav-${key}`,
-      label: `${section === key ? '› ' : ''}${['Accounts', 'Sync', 'Backups'][i]}`, hotkey: ['a', 's', 'b'][i],
+    copy('copy-diagnostics', 'Copy diagnostics', () => section === 'codex' ? codexDiagnosticsText(controller.codex.view) : diagnosticsText(v)),
+    row(['accounts', 'sync', 'backups', 'codex'].map((key, i) => Button({ key: `nav-${key}`,
+      label: `${section === key ? '› ' : ''}${['Accounts', 'Sync', 'Backups', 'Codex import'][i]}`, hotkey: ['a', 's', 'b', 'c'][i],
       dimColor: section !== key, onPress: () => go(key) }))),
     ...content,
-    ...(v.error ? [Text({ color: 'red', children: v.error })] : []),
+    ...(v.error && section !== 'codex' ? [Text({ color: 'red', children: v.error })] : []),
     ...(v.notice ? [note(v.notice)] : []),
     ...(v.copyStatus ? [note(v.copyStatus)] : []),
   ] });

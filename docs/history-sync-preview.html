@@ -9,7 +9,7 @@ button,select{font:inherit;border:1px solid #d6d3ca;background:#fcfbf8;border-ra
 .stage{margin-top:24px;border:1px solid #d6d3ca;border-radius:12px;background:#fcfbf8;padding:20px}.conversation{height:160px;display:grid;place-items:center;color:#95938a}.prompt{margin-top:14px;padding:20px;border:1px solid #d6d3ca;border-radius:10px;color:#8b897e}.tools{display:flex;flex-wrap:wrap;align-items:center;gap:18px;margin:24px 0;font-size:13px}.tools label{display:flex;gap:6px;align-items:center}
 .picker{display:flex;flex-direction:column;gap:5px}.picker select{width:100%}#menu{margin-top:20px;border:1px solid #d6d3ca;border-radius:10px;background:white;padding:12px}#menu[hidden]{display:none}.menu-top{display:flex;justify-content:space-between;align-items:center;padding:0 8px 8px;border-bottom:1px solid #e6e4dc;margin-bottom:8px;font-size:12px;color:#74736d}code{font-size:12px;overflow-wrap:anywhere}header{display:flex;align-items:center;flex-wrap:wrap;gap:12px}aside{border:1px dashed #c5c0b4;border-radius:8px;padding:10px;margin:16px 0}.footer{display:flex;flex-wrap:wrap;align-items:center;gap:12px;padding-top:8px}
 </style>
-<header><span class="badge">Version 0.5.0 · UI comparison</span><h1>History sync</h1></header>
+<header><span class="badge">Version 0.6.0 · UI comparison</span><h1>History sync and Codex import</h1></header>
 <p>Compare three native locations and three DOM launchers. This preview uses the production controller and both UI implementations with fixture accounts. Every operation is simulated; it cannot read or change account files.</p>
 <p class="muted">Claude supplies the final styling and pane placement. This is a layout and interaction preview. Automatic timers are disabled here; Start performs one simulated copy.</p>
 <aside aria-label="Sidebar">Example Desktop sidebar</aside>
@@ -17,7 +17,179 @@ button,select{font:inherit;border:1px solid #d6d3ca;background:#fcfbf8;border-ra
 <div class="tools"><button id="reload">Simulate session reload</button><button id="remove-dom">Remove DOM launchers</button><label><input id="failure" type="checkbox">Simulate copy failure</label><label><input id="ambiguous" type="checkbox">Session found in both accounts</label></div>
 <p class="muted">Simulated helper operations: <code id="operations"></code></p><p id="preview-error" class="error"></p>
 <textarea id="copy-output" hidden readonly aria-label="Selectable copy text" style="width:100%;height:160px"></textarea>
-<script type="module">const PROFILE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\\[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+<script type="module">const PROFILE = /^[0-9a-f-]{36}\\[0-9a-f-]{36}$/i;
+const SESSION = /^local_[0-9a-f-]{36}$/i;
+const fields = ['source','scope','folder','session','destinationFolder','codexHome','nodeExecutable','codexExecutable','newRevision'];
+const defaults = {source:'',scope:'Folder',folder:'',session:'',destinationFolder:'',codexHome:'',nodeExecutable:'',codexExecutable:'',newRevision:false};
+function createCodexController() {
+  const view = {...defaults, profiles:[], folders:[], sessions:[], busy:false, status:'Choose a Claude account to import from.', error:'', preview:null, result:null,
+    search:'', profileSearch:'', rowSearch:'', page:0, selected:'', advanced:false, saved:null, attempted:false, retryable:false};
+  let api, stopped = false, blocked = () => false, generation = 0, inFlight = 0;
+  const redraw = () => { if (!stopped) api?.redraw('ui.render'); };
+  const selection = () => Object.fromEntries(fields.map(key => [key, view[key]]));
+  const fingerprint = () => JSON.stringify(selection());
+  function change(key, value) {
+    if (view.busy || !fields.includes(key)) return;
+    if (key === 'scope' && !['Folder','Session'].includes(value)) return;
+    if (key === 'newRevision' ? typeof value !== 'boolean' : typeof value !== 'string' || value.length > 4096) return;
+    if (view[key] === value) return;
+    view[key] = value;
+    if (key === 'source') Object.assign(view,{folder:'',session:'',folders:[],sessions:[],search:''});
+    if (key === 'scope') view.search='';
+    Object.assign(view,{preview:null,result:null,error:'',page:0,selected:'',attempted:false,retryable:false,status:'Selection changed. Preview before importing.'}); redraw();
+  }
+  function validate(needScope = true) {
+    if (!PROFILE.test(view.source) || !view.profiles.some(p => p.Id === view.source)) throw new Error('Choose an available Claude source account.');
+    if (needScope && (view.scope === 'Folder' ? !view.folder : !SESSION.test(view.session))) throw new Error('Choose a source folder or session, then preview.');
+  }
+  async function bridge(action, frozen) {
+    const adapter=api,current=generation,settings=selection();
+    if (!adapter.windows) throw new Error('Claude to Codex imports require Windows.');
+    const argv = ['powershell.exe','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',`${adapter.root}/scripts/ClaudeCodex-Bridge.ps1`,'-Action',action];
+    const config = await adapter.envGet('ACCOUNT_HISTORY_SYNC_CONFIG');
+    if(stopped||current!==generation)throw new Error('Session changed before the import helper started.');
+    if (config) argv.push('-ConfigPath',config);
+    if (action !== 'Profiles') {
+      argv.push('-SourceProfile',settings.source,'-Scope',settings.scope);
+      if (settings.folder && settings.scope === 'Folder') argv.push('-ScopeFolder',settings.folder);
+      if (settings.session && settings.scope === 'Session') argv.push('-ScopeSession',settings.session);
+      for (const [key,flag] of [['destinationFolder','DestinationFolder'],['codexHome','CodexHome'],['nodeExecutable','NodeExecutable'],['codexExecutable','CodexExecutable']]) if(settings[key]) argv.push(`-${flag}`,settings[key]);
+      if (settings.newRevision) argv.push('-NewRevision');
+      if (frozen) argv.push('-PlanPath',frozen.planPath);
+    }
+    const result = await adapter.processRun(argv,{timeoutMs:600_000});
+    if (result.isStdoutTruncated) throw new Error('Helper output was truncated. Keep the saved preview and retry after reloading the plugin.');
+    let envelope;
+    try { envelope = JSON.parse(result.stdout); } catch { throw new Error(`Import helper returned invalid output. ${result.stderr?.slice(0,300)||''}`); }
+    if (result.exitCode !== 0 || !envelope.Ok) throw new Error(envelope.Error || 'Import helper failed.');
+    if (envelope.Action !== action || typeof envelope.ResultPath !== 'string' || !/^(?:[a-z]:[\\/]|\\\\)/i.test(envelope.ResultPath) || !Number.isInteger(envelope.ResultBytes) || envelope.ResultBytes < 1 || envelope.ResultBytes > 4194304) throw new Error('Import helper returned invalid result metadata.');
+    const text = await adapter.readText(envelope.ResultPath);
+    if (typeof text !== 'string' || text.length > 4194304) throw new Error('Import result exceeds the display limit.');
+    const data = JSON.parse(text);
+    if (data.action !== action) throw new Error('Import result does not match this request.');
+    if (['Plan','Resume','Import'].includes(action) && (!Array.isArray(data.rows) || data.rows.some(r => !r || !SESSION.test(r.id) || typeof r.title !== 'string' || typeof r.status !== 'string'))) throw new Error('Import result has invalid session rows.');
+    if (data.rows?.some(r=>typeof r.reason!=='string'||!Array.isArray(r.warnings)||r.warnings.some(w=>typeof w!=='string'))) throw new Error('Import result has invalid session details.');
+    return data;
+  }
+  async function run(label, work) {
+    if(stopped)return null;
+    if(view.busy||inFlight){view.status='A Codex request is still finishing. Wait, then try again.';redraw();return null;}
+    if(blocked()){view.status='Claude history sync is busy. Pause it or wait, then try again.';redraw();return null;}
+    inFlight++;
+    view.busy = true; view.error = ''; view.status = label; redraw();
+    const current=generation,active=()=>!stopped&&current===generation;
+    return Promise.resolve().then(()=>active()?work(active):null).catch(error=>{if(active()){view.error=error.message;view.status='Check the error, then try again.';}return null;})
+      .finally(()=>{inFlight--;if(active()){view.busy=false;redraw();}else if(!stopped&&!inFlight){view.status='The previous request finished. Load the saved preview or refresh accounts.';redraw();}});
+  }
+  async function save(frozen) {
+    view.saved = frozen;
+    try { await api.storeSet('codexSavedPreview',frozen); }
+    catch { view.error = 'The preview is saved on disk, but its shortcut could not be remembered. Copy the preview path before closing.'; }
+  }
+  async function refresh() { return run('Finding Claude accounts…',async active=>{
+    const data=await bridge('Profiles'); if(!active())return;
+    if(!Array.isArray(data.profiles)||data.profiles.some(p=>!PROFILE.test(p.Id)))throw new Error('Import helper returned invalid accounts.');
+    view.profiles=data.profiles.map(p=>({Id:p.Id,Email:typeof p.Email==='string'?p.Email:'',Label:typeof p.Label==='string'?p.Label:''}));
+    if(view.source&&!view.profiles.some(p=>p.Id===view.source))Object.assign(view,{source:'',folder:'',session:'',folders:[],sessions:[],preview:null,result:null,attempted:false,retryable:false});
+    view.status=`Found ${view.profiles.length} Claude accounts. Choose the source account.`;
+  }); }
+  async function choices() { return run('Loading folders and sessions…',async active=>{
+    validate(false);const data=await bridge('Choices');if(!active())return;
+    if(!Array.isArray(data.folders)||data.folders.some(f=>!f||typeof f.Path!=='string'||!Number.isInteger(f.Count))||!Array.isArray(data.sessions)||data.sessions.some(s=>!s||!SESSION.test(s.Id)||typeof s.Title!=='string'||typeof s.Folder!=='string'))throw new Error('Import helper returned invalid choices.');
+    view.folders=data.folders;view.sessions=data.sessions;view.status=`Loaded ${data.folders.length} folders and ${data.sessions.length} sessions.`;
+  }); }
+  async function preview() { return run('Preparing a read-only preview…',async active=>{
+    validate();view.preview=null;view.result=null;view.attempted=false;view.retryable=false;
+    const key=fingerprint(),settings=selection(),data=await bridge('Plan');if(!active())return;
+    if(typeof data.planPath!=='string')throw new Error('Preview has no saved plan.');
+    view.preview={...data,key};view.page=0;view.selected='';view.status='Preview ready. Review the sessions before importing.';
+    await save({settings,planPath:data.planPath});
+  }); }
+  async function resume() {
+    if(view.busy||!view.saved)return;
+    const saved=view.saved;
+    if(!saved.settings||fields.some(k=>k==='newRevision'?typeof saved.settings[k]!=='boolean':typeof saved.settings[k]!=='string'||saved.settings[k].length>4096))return;
+    return run('Loading the saved preview…',async active=>{
+      if(saved.settings.source!==view.source||saved.settings.scope!==view.scope)Object.assign(view,{folders:[],sessions:[],search:''});
+      for(const key of fields)view[key]=saved.settings[key];
+      validate();view.preview=null;view.result=null;
+      const data=await bridge('Resume',saved);if(!active())return;
+      view.preview={...data,key:fingerprint()};view.attempted=true;view.retryable=true;
+      view.status='Saved preview loaded. Import will recheck source files and reconcile earlier attempts.';
+    });
+  }
+  const canImport = () => !view.busy && !inFlight && !stopped && !!view.preview && view.preview.key===fingerprint() && view.preview.rows.some(r=>r.status==='Ready') && (!view.attempted||view.retryable);
+  async function importPreview() {
+    if(!canImport())return null;
+    return run('Importing the saved preview into Codex…',async active=>{
+      validate();view.attempted=true;view.retryable=true;
+      const data=await bridge('Import',view.preview);if(!active())return;
+      view.result=data;view.retryable=data.rows.some(r=>['NotAttempted','NeedsInvestigation'].includes(r.status));
+      const count=data.rows.filter(r=>['Imported','Recovered'].includes(r.status)).length;
+      view.status=`Import finished: ${count} imported or recovered. Review all results below.`;
+    });
+  }
+  return {view,change,refresh,choices,preview,resume,canImport,importPreview,hasPending:()=>inFlight>0,
+    async initialize(adapter,isBlocked=()=>false){generation++;api=adapter;blocked=isBlocked;stopped=false;Object.assign(view,defaults,{busy:false,error:'',profiles:[],folders:[],sessions:[],search:'',preview:null,result:null,attempted:false,retryable:false,status:'Choose a Claude account to import from.'});const saved=await api.storeGet('codexSavedPreview');view.saved=saved&&typeof saved.planPath==='string'?saved:null;},
+    async open(){if(!stopped&&!view.profiles.length)await refresh();},stop(){generation++;stopped=true;view.busy=false;},
+    search(value){view.search=String(value).slice(0,200);redraw();},searchRows(value){view.rowSearch=String(value).slice(0,200);view.page=0;redraw();},
+    searchProfiles(value){view.profileSearch=String(value).slice(0,200);redraw();},
+    page(value){if(Number.isInteger(value)&&value>=0)view.page=value;redraw();},select(id){view.selected=view.selected===id?'':id;redraw();},advanced(){view.advanced=!view.advanced;redraw();}};
+}
+
+function codexDiagnosticsText(v) {
+  const data=v.result||v.preview;
+  return ['Claude to Codex import',`Source: ${v.profiles.find(p=>p.Id===v.source)?.Email||v.source}`,`Selection: ${v.scope} · ${v.scope==='Folder'?v.folder:v.session}`,v.status,v.error,
+    ...(data?[`Codex directory: ${data.codexHome}`,`Preview: ${data.planPath}`,`Receipt: ${data.receiptPath||'Not imported'}`,
+      ...data.rows.map(r=>`${r.title} | ${r.status} | ${r.archived?'Archived':'Active'} | ${r.messages||0} messages\n${r.reason}\n${(r.warnings||[]).join('\n')}`)]:[])].filter(Boolean).join('\n');
+}
+function renderCodexPane({Box,Text,Button,Select,Input},c,copy=()=>null) {
+  const v=c.view,heading=children=>Text({bold:true,children}),note=children=>Text({dimColor:true,children});
+  const button=(key,label,fn,enabled=true)=>Button({key,label,dimColor:v.busy||!enabled,onPress:()=>{if(!v.busy&&enabled)return fn();}});
+  const input=(key,label,placeholder)=>Input?Input({key:`codex-${key}`,label,placeholder,value:v[key],onInput:value=>c.change(key,value),onSubmit:value=>c.change(key,value)}):note(`${label}: ${v[key]||'Default'}`);
+  const row=children=>Box({flexDirection:'row',flexWrap:'wrap',gap:1,children});
+  const query=v.search.toLocaleLowerCase(),selected=v.scope==='Folder'?v.folder:v.session;
+  const accounts=v.profiles.map(p=>({value:p.Id,label:`${(p.Email||p.Label||'Claude account').slice(0,200)} · ${p.Id.split('\\')[1].slice(0,8)}`})).filter(p=>p.value===v.source||p.label.toLocaleLowerCase().includes(v.profileSearch.toLocaleLowerCase()));
+  const accountOptions=accounts.slice(0,62);if(v.source&&!accountOptions.some(p=>p.value===v.source)){const keep=accounts.find(p=>p.value===v.source);if(keep)accountOptions.push(keep);}
+  const choices=v.scope==='Folder'?v.folders.map(f=>({value:f.Path,label:`${f.Path.slice(0,360)} · ${f.Count} sessions`})):
+    v.sessions.map(s=>({value:s.Id,label:`${(s.Title||'Untitled session').slice(0,160)} · ${s.Folder.slice(0,240)}`}));
+  const filtered=choices.filter(o=>o.value===selected||o.label.toLocaleLowerCase().includes(query));
+  // Keep large catalogs bounded without removing the selected option.
+  const visible=filtered.slice(0,62);if(selected&&!visible.some(o=>o.value===selected)){const keep=choices.find(o=>o.value===selected);if(keep)visible.push(keep);}
+  if(selected&&!visible.some(o=>o.value===selected))visible.push({value:selected,label:v.scope==='Session'?(v.preview?.rows.find(r=>r.id===selected)?.title||'Saved session'):selected.slice(0,360)});
+  const data=v.result||v.preview,rows=data?.rows||[],matches=rows.filter(r=>r.title.toLocaleLowerCase().includes(v.rowSearch.toLocaleLowerCase()));
+  const pages=Math.max(1,Math.ceil(matches.length/15)),page=Math.min(v.page,pages-1),details=rows.find(r=>r.id===v.selected);
+  const counts=Object.entries(rows.reduce((all,r)=>(all[r.status]=(all[r.status]||0)+1,all),{})).map(([status,n])=>`${n} ${status}`).join(' · ');
+  const ready=v.preview?.rows.filter(r=>r.status==='Ready').length||0;
+  return [heading('Claude → Codex'),note('Copy a folder or a session and its descendants as new Codex conversations.'),
+    ...(v.profiles.length>62&&Input?[Input({key:'codex-account-search',label:'Find an account',value:v.profileSearch,onInput:value=>c.searchProfiles(value),onSubmit:value=>c.searchProfiles(value)})]:[]),
+    Select({key:'codex-source',label:'Claude source account',value:v.source,options:[{value:'',label:'Choose an account…'},...accountOptions],onSelect:value=>c.change('source',value)}),
+    row([button('codex-accounts','Refresh accounts',()=>c.refresh()),button('codex-choices','Load folders and sessions',()=>c.choices(),!!v.source)]),
+    Select({key:'codex-scope',label:'What to import',value:v.scope,options:[{value:'Folder',label:'Project folder and descendants'},{value:'Session',label:'Session and descendants'}],onSelect:value=>c.change('scope',value)}),
+    ...(Input?[Input({key:'codex-choice-search',label:v.scope==='Folder'?'Find a folder':'Find a session',placeholder:'Search…',value:v.search,onInput:value=>c.search(value),onSubmit:value=>c.search(value)})]:[]),
+    Select({key:'codex-selection',label:v.scope==='Folder'?'Source folder':'Source session',value:selected,options:[{value:'',label:'Choose a source…'},...visible],onSelect:value=>c.change(v.scope==='Folder'?'folder':'session',value)}),
+    note(`${filtered.length} matching choices${filtered.length>62?' · Showing up to 62; refine the search.':''}`),
+    note('Parent sessions include their children. Codex displays the conversations as separate threads.'),
+    input('destinationFolder','Project folder in Codex (optional)','Keep source folders, or enter an existing local folder'),
+    note('Choose an existing project folder when source worktrees are unavailable. Project files are not copied.'),
+    Select({key:'codex-revision',label:'Previously imported conversations',value:v.newRevision?'new':'keep',options:[{value:'keep',label:'Keep existing imports'},{value:'new',label:'Create separate snapshots for changed conversations'}],onSelect:value=>c.change('newRevision',value==='new')}),
+    button('codex-advanced','Runtime and destination settings',()=>c.advanced()),
+    ...(v.advanced?[input('codexHome','Codex data directory (optional)','Use CODEX_HOME or the current Windows profile'),input('nodeExecutable','Node executable (optional)','Use node.exe on PATH'),input('codexExecutable','Codex executable (optional)','Use Codex on PATH')]:[]),
+    row([button('codex-preview','Preview changes',()=>c.preview(),!!v.source&&!!selected),button('codex-import',v.result&&!v.retryable?'Import completed':v.attempted?'Retry saved import':`Import ${ready} ${ready===1?'session':'sessions'}`,()=>c.importPreview(),c.canImport())]),
+    ...(v.saved?[row([button('codex-resume','Load saved preview',()=>c.resume(),!!v.profiles.length),copy('codex-copy-plan','Copy saved preview path',()=>v.saved.planPath)])]:[]),
+    Text({color:v.busy?'yellow':undefined,children:v.status}),...(v.error?[Text({color:'red',children:v.error.slice(0,4000)})]:[]),
+    ...(data?[heading(v.result?'Import results':'Preview'),Text({children:`Codex directory: ${data.codexHome}\n${counts}`}),
+      note('Only Ready sessions are imported. Archived conversations keep their archive state. Existing Codex conversations are kept.'),
+      note('Images and PDFs are linked local files. Provider thinking is omitted; encrypted advisor text is represented by placeholders.'),
+      ...(Input?[Input({key:'codex-row-search',label:'Search preview titles',value:v.rowSearch,placeholder:'Session title…',onInput:value=>c.searchRows(value),onSubmit:value=>c.searchRows(value)})]:[]),
+      note(`${matches.length} sessions · page ${page+1} of ${pages}`),
+      ...matches.slice(page*15,(page+1)*15).map(r=>Box({key:`codex-row-${r.id}`,flexDirection:'column',children:[heading((r.title||'Untitled session').slice(0,1000)),Text({children:`${r.status} · ${r.archived?'Archived':'Active'} · ${r.messages||0} messages`}),button(`codex-detail-${r.id}`,'Details',()=>c.select(r.id))]})),
+      row([button('codex-prev','Previous',()=>c.page(page-1),page>0),button('codex-next','Next',()=>c.page(page+1),page+1<pages)]),
+      ...(details?[heading(details.title.slice(0,1000)),Text({children:details.reason.slice(0,4000)}),Text({children:`Project folder: ${details.cwd||'Unavailable'}`}),...(details.warnings||[]).map(w=>Text({children:w.slice(0,2000)})),...(details.target?[Text({children:`Codex thread: ${details.target}`})]:[])]:[]),
+      ...(data.receiptPath?[Text({children:`Receipt: ${data.receiptPath}`}),copy('codex-copy-receipt','Copy import receipt path',()=>data.receiptPath)]:[])]:[])];
+}
+
+const PROFILE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\\[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function describeResult(result) {
   const mode = result.Action === 'Plan' ? 'Preview' : 'Synced';
@@ -25,6 +197,7 @@ function describeResult(result) {
 }
 
 function createController() {
+  const codex = createCodexController();
   const view = {
     profiles: [], source: '', sourceCandidates: [], target: '', enabled: false, busy: false,
     status: 'Finding the account for this session…', error: '',
@@ -49,8 +222,15 @@ function createController() {
     try { await api.storeSet(key, value); }
     catch { view.notice = 'Could not remember preferences or recent results. Any backup already created remains on disk.'; redraw(); }
   }
-  function showSection(section) {
-    if (!['accounts', 'sync', 'backups'].includes(section)) return;
+  async function showSection(section) {
+    if (!['accounts', 'sync', 'backups', 'codex'].includes(section)) return;
+    if (section === 'codex') {
+      const waiting=!!running||view.enabled;view.section=section;
+      if(waiting)codex.view.status='Waiting for Claude history sync to pause…';
+      redraw();await pause();
+      if(waiting)codex.view.status='Claude history sync is paused. Review or load a Codex preview.';
+      await codex.open();return;
+    }
     view.section = section; redraw();
   }
   function filterPreview(value) {
@@ -193,6 +373,7 @@ function createController() {
   }
   async function run(label, work) {
     if (ended || running) return null;
+    if(codex.hasPending()){view.status='A Codex import request is still running. Wait before starting Claude history sync.';redraw();return null;}
     view.busy = true; view.error = ''; view.status = label; redraw();
     // Promise.resolve defers work until running is assigned, including synchronous failures.
     running = Promise.resolve().then(work).catch(async error => {
@@ -301,12 +482,14 @@ function createController() {
     if (result && view.enabled) await sync(true);
   }
   function stop() {
+    codex.stop();
     revision += 1;
     ended = true; view.enabled = false;
     interval?.cancel(); debounce?.cancel();
   }
   async function initialize(adapter) {
     api = adapter;
+    await codex.initialize(adapter, () => !!running || ended || view.enabled);
     if (api.windows === false) {
       view.error = 'Account history sync runs on native Windows sessions.';
       return;
@@ -351,6 +534,7 @@ function createController() {
     view.enabled = false; view.error = '';
     interval = null; debounce = null;
     await initialize(api);
+    if(view.section==='codex')await codex.open();
     view.status = `Session changed; auto-sync paused. ${view.status}`;
     redraw();
   }
@@ -362,7 +546,7 @@ function createController() {
   function statusText() {
     return `${view.enabled ? 'Auto-sync active' : 'Auto-sync paused'}; ${view.source || '(confirm open account)'} → ${view.target || '(choose destination)'}. Scope: ${view.scopeLabel}. ${view.status}${view.error ? ` ${view.error}` : ''}`;
   }
-  return { view, initialize, refresh, choose, preview, start, pause, sync, stop, afterTurn, reopen, resolveSelector, statusText,
+  return { view, codex, initialize, refresh, choose, preview, start, pause, sync, stop, afterTurn, reopen, resolveSelector, statusText,
     showSection, toggleDetails, choosePromptDisplay, chooseLauncherPlacement, copyText,
     filterPreview, filterPreviewChanges, searchPreview, pagePreview, selectPreview,
     chooseScope, searchScopes, loadChoices };
@@ -661,6 +845,8 @@ function renderPane({ Box, Text, Button, Select, Input }, controller, writer = a
         ...(v.previewRows.length ? renderPreviewTable({Box,Text,Button,Select,Input},controller,copy) :
           v.report.length ? [Text({children:v.report.map(r=>`${r.Action}: ${r.File}\n${r.Detail}`).join('\n').slice(0,9500)})] : [note('No sessions in this preview.')])] : []),
     ];
+  } else if (section === 'codex') {
+    content = renderCodexPane({Box,Text,Button,Select,Input},controller.codex,copy);
   } else {
     content = [
       heading('Backups'),
@@ -677,12 +863,12 @@ function renderPane({ Box, Text, Button, Select, Input }, controller, writer = a
   }
   return Box({ flexDirection: 'column', gap: 1, padding: 1, children: [
     heading('History sync'),
-    copy('copy-diagnostics', 'Copy diagnostics', () => diagnosticsText(v)),
-    row(['accounts', 'sync', 'backups'].map((key, i) => Button({ key: `nav-${key}`,
-      label: `${section === key ? '› ' : ''}${['Accounts', 'Sync', 'Backups'][i]}`, hotkey: ['a', 's', 'b'][i],
+    copy('copy-diagnostics', 'Copy diagnostics', () => section === 'codex' ? codexDiagnosticsText(controller.codex.view) : diagnosticsText(v)),
+    row(['accounts', 'sync', 'backups', 'codex'].map((key, i) => Button({ key: `nav-${key}`,
+      label: `${section === key ? '› ' : ''}${['Accounts', 'Sync', 'Backups', 'Codex import'][i]}`, hotkey: ['a', 's', 'b', 'c'][i],
       dimColor: section !== key, onPress: () => go(key) }))),
     ...content,
-    ...(v.error ? [Text({ color: 'red', children: v.error })] : []),
+    ...(v.error && section !== 'codex' ? [Text({ color: 'red', children: v.error })] : []),
     ...(v.notice ? [note(v.notice)] : []),
     ...(v.copyStatus ? [note(v.copyStatus)] : []),
   ] });
@@ -696,12 +882,14 @@ const profiles = [
   {Id:B, Email:'other@example.test', OrganizationId:B.split('\\')[1], Sessions:4},
 ];
 let c, paneOpen = false, copies = 0, interrupted = false, ambiguous = false;
+const codexFiles=new Map(),codexPlans=new Map();let codexToken=0;
 const saved = new Map([['destination', B]]), log = [];
 const noopTimer = () => ({cancel(){}});
 const adapter = {
   root:'Fixture only', windows:true, sessionId:async()=> 'preview', envGet:async()=> '',
   now:async()=>Date.now(), storeGet:async key=>saved.get(key), storeSet:async(key,value)=>saved.set(key,value),
   redraw:()=>queueMicrotask(draw), log:()=>{}, every:noopTimer, after:noopTimer,
+  readText:async path=>codexFiles.get(path),
   processRun:async argv=> {
     const action = argv[argv.indexOf('-Action')+1];
     log.unshift(action); draw();
@@ -715,6 +903,24 @@ const adapter = {
       {File:'local_pending.json',Title:'Unfinished startup',Action:'Skipped',Before:null,After:null,Detail:'CLI session has not started'},
       {File:'local_matching.json',Title:'Documentation review',Action:'Unchanged',Before:{Title:'Documentation review',Archived:true},After:{Title:'Documentation review',Archived:true},Detail:'Already matches'},
     ].map((row,index)=>({...row,File:'local_'+['aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa','bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb','cccccccc-cccc-4ccc-8ccc-cccccccccccc','dddddddd-dddd-4ddd-8ddd-dddddddddddd','eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee'][index]+'.json',Folder:index<3?'C:\\Projects\\SampleProject':'C:\\Projects\\Other'}));
+    if(argv.some(arg=>arg.includes('ClaudeCodex-Bridge.ps1'))){
+      const value=flag=>argv.includes(flag)?argv[argv.indexOf(flag)+1]:'';
+      let data={action};
+      if(action==='Profiles')data.profiles=profiles;
+      if(action==='Choices'){data.folders=[{Path:'C:\\Projects\\SampleProject',Count:3},{Path:'C:\\Projects\\Other',Count:2}];data.sessions=fixtureRows.map(r=>({Id:r.File.slice(0,-5),Title:r.Title,Folder:r.Folder}));}
+      if(action==='Plan'){
+        const rows=fixtureRows.filter((r,i)=>value('-Scope')==='Folder'?r.Folder===value('-ScopeFolder'):r.File===value('-ScopeSession')+'.json'||value('-ScopeSession')===fixtureRows[0].File.slice(0,-5)&&i===1);
+        data={...data,planPath:'C:/Private/codex-imports/fixture/plans/'+(++codexToken)+'.json',codexHome:value('-CodexHome')||'C:/Example User/.codex',rows:rows.map(r=>({id:r.File.slice(0,-5),title:r.Title,status:({Add:'Ready',Update:argv.includes('-NewRevision')?'Ready':'Changed',Conflict:'Skipped',Skipped:'Skipped',Unchanged:'Unchanged'})[r.Action],reason:r.Detail,messages:35,archived:r.After?.Archived||false,cwd:value('-DestinationFolder')||r.Folder,warnings:r.Action==='Add'?['2 images are preserved as linked local attachments.']:[]}))};
+        codexPlans.set(data.planPath,data);
+      }
+      if(action==='Resume'||action==='Import'){
+        const prior=codexPlans.get(value('-PlanPath'));
+        if(!prior)return{exitCode:1,stdout:JSON.stringify({Ok:false,Error:'Saved fixture preview unavailable. Preview again.'})};
+        data={...prior,action,rows:prior.rows.map(r=>({...r,status:action==='Import'&&r.status==='Ready'?'Imported':r.status,target:action==='Import'&&r.status==='Ready'?'fixture-codex-thread':undefined})),receiptPath:action==='Import'?'C:/Private/import-receipt.json':undefined};
+      }
+      const text=JSON.stringify(data),file='C:/Private/codex-result-'+(++codexToken)+'.json';codexFiles.set(file,text);
+      return{exitCode:0,stdout:JSON.stringify({Ok:true,Action:action,ResultPath:file,ResultBytes:text.length}),stderr:''};
+    }
     if(action==='Choices')Object.assign(result,{Folders:[{Path:'C:\\Projects\\SampleProject',Count:3},{Path:'C:\\Projects\\Other',Count:2}],Sessions:fixtureRows.map(row=>({Id:row.File.slice(0,-5),Title:row.Title,Folder:row.Folder}))});
     const scope=argv.includes('-Scope')?argv[argv.indexOf('-Scope')+1]:'All';
     const folder=argv.includes('-ScopeFolder')?argv[argv.indexOf('-ScopeFolder')+1]:'';

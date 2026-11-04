@@ -2,8 +2,8 @@
 
 Import local Windows **Claude Desktop Code** conversations as new, readable Codex
 threads. Select a project folder or a session and its descendants, preview the
-result, then import that saved snapshot. This is an initial standalone feature;
-the History sync mod still handles Claude account-to-account sync only.
+result, then import that saved snapshot. Use the History sync mod's **Codex import**
+tab or the standalone command-line importer.
 
 Requires Windows PowerShell 5.1 or PowerShell 7, Node.js 22 or later, and a Codex
 CLI with the external-agent session import API. Native integration tests pass
@@ -13,7 +13,7 @@ normal background network activity. ClaudeSync does not edit Codex databases.
 
 ## Other Windows computers
 
-The importer is command-line only; there is no Codex import button in the mod.
+Both the **Codex import** tab and the command-line importer use the same engine.
 The checkout can live on any local drive. It discovers Claude Desktop profiles
 on that computer, reads the source roots from `profiles.json`, and uses that
 Windows user's profile and LocalAppData for default destination and private state.
@@ -40,6 +40,39 @@ and preview afresh against the source history available on the other computer.
 macOS and Linux are not supported by this Windows Desktop importer.
 
 ## Select and preview
+
+In Claude, open **History sync → Codex import**, or run `/history-sync codex`.
+Choose any locally available source account and **Load folders and sessions**.
+Select **Project folder and descendants** or **Session and descendants**, then
+choose the folder or parent. Search narrows large catalogs without losing the
+current selection. A child chosen directly includes its own descendants.
+
+Use **Project folder in Codex** to map unavailable worktrees to an existing local
+project. Optional **Runtime and destination settings** override the local Codex
+data directory or the Node/Codex executable paths; leave them blank for discovery.
+
+Select **Preview changes**. Review the Ready/Skipped/Unchanged counts, archive
+state and message counts; **Details** shows each reason and attachment warning.
+Select **Import** to import only Ready rows from that exact saved preview. Editing
+any selection or import setting clears it. The existing Claude auto-sync is paused
+when entering this tab, and Codex imports are always manual.
+
+**Keep existing imports** is the default. To copy a changed conversation again,
+choose **Create separate snapshots for changed conversations**, then preview again.
+This creates another thread and preserves the earlier one.
+
+The pane shows results and the receipt after import. For an interruption, use
+**Retry saved import**; **Load saved preview** also makes the last preview available
+after a reload. Neither action automatically imports. The engine rechecks source
+hashes and reconciles native history before resubmitting. The pane's helper call
+has a ten-minute budget: if an unusually large import exceeds it, retain the saved
+preview and allow the original process to finish before retrying. An active import
+lock prevents a second import from running concurrently.
+Temporary files used to display UI results expire after 24 hours. Saved import
+plans, transcript snapshots and receipts are retained for recovery.
+
+Build with `Build-Mod.ps1` and reload/update the installed local plugin to get the
+new tab. These steps apply equally to the command-line interface below:
 
 ```powershell
 # Read-only account and source-folder/session discovery.

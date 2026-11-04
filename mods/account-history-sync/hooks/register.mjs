@@ -2,7 +2,7 @@ import { createController } from './controller.mjs';
 import { renderBand, renderPane, renderLauncher, launcherVisible } from './ui.mjs';
 
 const PANE = 'history-sync';
-const HELP = 'Open History sync above the prompt or use /history-sync. Optional commands: accounts, backups, profiles, to <inactive-destination-email-or-id>, preview, sync, start, pause, status. Pause before switching accounts.';
+const HELP = 'Open History sync above the prompt or use /history-sync. Use /history-sync codex for Claude → Codex imports. Optional commands: accounts, backups, profiles, to <inactive-destination-email-or-id>, preview, sync, start, pause, status. Pause before switching accounts.';
 
 export function register(on) {
   const controller = createController();
@@ -23,7 +23,7 @@ export function register(on) {
       after: (ms, fn) => $.clock.after(ms, fn),
     };
     await controller.initialize(adapter);
-    await $.command.register({ name: 'history-sync', description: 'Manage local account history sync', argumentHint: '[accounts|backups|to|preview|sync|start|pause|status]', immediate: true });
+    await $.command.register({ name: 'history-sync', description: 'Manage history sync and Codex imports', argumentHint: '[accounts|codex|backups|to|preview|sync|start|pause|status]', immediate: true });
     return next(e);
   });
   on('session.end', async ($, e, next) => {
@@ -41,6 +41,10 @@ export function register(on) {
     try {
       await controller.reopen();
       switch (args[0] || '') {
+        case 'codex':
+          await $.ui.open({ id: PANE, title: 'History sync', focus: true, closeOnEscape: true });
+          await controller.showSection('codex');
+          return {};
         case '': case 'accounts': case 'backups':
           if (args[0]) controller.showSection(args[0]);
           if (!controller.view.source || !controller.view.target) controller.showSection(args[0] === 'backups' ? 'backups' : 'accounts');

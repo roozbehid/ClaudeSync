@@ -1,3 +1,4 @@
+import {createCodexController} from './codex-controller.mjs';
 const PROFILE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\\[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export function describeResult(result) {
@@ -6,6 +7,7 @@ export function describeResult(result) {
 }
 
 export function createController() {
+  const codex = createCodexController();
   const view = {
     profiles: [], source: '', sourceCandidates: [], target: '', enabled: false, busy: false,
     status: 'Finding the account for this session…', error: '',
@@ -30,8 +32,15 @@ export function createController() {
     try { await api.storeSet(key, value); }
     catch { view.notice = 'Could not remember preferences or recent results. Any backup already created remains on disk.'; redraw(); }
   }
-  function showSection(section) {
-    if (!['accounts', 'sync', 'backups'].includes(section)) return;
+  async function showSection(section) {
+    if (!['accounts', 'sync', 'backups', 'codex'].includes(section)) return;
+    if (section === 'codex') {
+      const waiting=!!running||view.enabled;view.section=section;
+      if(waiting)codex.view.status='Waiting for Claude history sync to pause…';
+      redraw();await pause();
+      if(waiting)codex.view.status='Claude history sync is paused. Review or load a Codex preview.';
+      await codex.open();return;
+    }
     view.section = section; redraw();
   }
   function filterPreview(value) {
@@ -174,6 +183,7 @@ export function createController() {
   }
   async function run(label, work) {
     if (ended || running) return null;
+    if(codex.hasPending()){view.status='A Codex import request is still running. Wait before starting Claude history sync.';redraw();return null;}
     view.busy = true; view.error = ''; view.status = label; redraw();
     // Promise.resolve defers work until running is assigned, including synchronous failures.
     running = Promise.resolve().then(work).catch(async error => {
@@ -282,12 +292,14 @@ export function createController() {
     if (result && view.enabled) await sync(true);
   }
   function stop() {
+    codex.stop();
     revision += 1;
     ended = true; view.enabled = false;
     interval?.cancel(); debounce?.cancel();
   }
   async function initialize(adapter) {
     api = adapter;
+    await codex.initialize(adapter, () => !!running || ended || view.enabled);
     if (api.windows === false) {
       view.error = 'Account history sync runs on native Windows sessions.';
       return;
@@ -332,6 +344,7 @@ export function createController() {
     view.enabled = false; view.error = '';
     interval = null; debounce = null;
     await initialize(api);
+    if(view.section==='codex')await codex.open();
     view.status = `Session changed; auto-sync paused. ${view.status}`;
     redraw();
   }
@@ -343,7 +356,7 @@ export function createController() {
   function statusText() {
     return `${view.enabled ? 'Auto-sync active' : 'Auto-sync paused'}; ${view.source || '(confirm open account)'} → ${view.target || '(choose destination)'}. Scope: ${view.scopeLabel}. ${view.status}${view.error ? ` ${view.error}` : ''}`;
   }
-  return { view, initialize, refresh, choose, preview, start, pause, sync, stop, afterTurn, reopen, resolveSelector, statusText,
+  return { view, codex, initialize, refresh, choose, preview, start, pause, sync, stop, afterTurn, reopen, resolveSelector, statusText,
     showSection, toggleDetails, choosePromptDisplay, chooseLauncherPlacement, copyText,
     filterPreview, filterPreviewChanges, searchPreview, pagePreview, selectPreview,
     chooseScope, searchScopes, loadChoices };

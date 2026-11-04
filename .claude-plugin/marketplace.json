@@ -6,8 +6,8 @@
     {
       "name": "account-history-sync",
       "source": "./mods/account-history-sync",
-      "description": "One-way local account history sync inside Claude Code.",
-      "version": "0.5.1"
+      "description": "Local Claude account history sync and selected Claude-to-Codex imports.",
+      "version": "0.6.0"
     }
   ]
 }

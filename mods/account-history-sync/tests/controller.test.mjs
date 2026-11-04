@@ -4,6 +4,12 @@ import { createController } from '../hooks/controller.mjs';
 import { register } from '../hooks/register.mjs';
 import { renderBand, renderPane, previewText, filteredPreviewRows } from '../hooks/ui.mjs';
 
+test('reopening on the Codex tab reloads its account catalog without importing',async()=>{
+ const {c,api,calls}=await ready({respond:async(action,argv)=>argv.some(a=>a.includes('ClaudeCodex-Bridge.ps1'))?{exitCode:0,stdout:JSON.stringify({Ok:true,Action:action,ResultPath:'C:/Private/profiles.json',ResultBytes:200})}:null});
+ api.readText=async()=>JSON.stringify({action:'Profiles',profiles});
+ await c.showSection('codex');assert.equal(c.codex.view.profiles.length,2);c.stop();await c.reopen();assert.equal(c.view.section,'codex');assert.equal(c.codex.view.profiles.length,2);assert.equal(c.codex.view.source,'');assert.ok(!calls.some(c=>c.action==='Import'));
+});
+
 const A = '11111111-1111-4111-8111-111111111111\\22222222-2222-4222-8222-222222222222';
 const B = '33333333-3333-4333-8333-333333333333\\44444444-4444-4444-8444-444444444444';
 const profiles = [
