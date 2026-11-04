@@ -36,15 +36,17 @@ SSH keys, and schedule registrations are outside the sync scope.
 
 ## Requirements
 
-- Windows, with Claude Desktop Code history for at least two profiles under the
-  same Windows user.
+- Windows, with local Claude Desktop Code history. Account-to-account sync
+  requires at least two profiles under the same Windows user.
 - Windows PowerShell 5.1 or PowerShell 7.
 - A local filesystem that supports private Windows folder permissions for state
   and backups. Administrator rights are not required.
 - For the optional mod: Claude Code Mods support enabled in the environment
   running the session. Availability and UI placement depend on the host.
 
-Node.js is only needed for development tests and the separate DOM experiment.
+Claude → Codex imports require Node.js 22 or later and a compatible Codex CLI
+(native integration tested with 0.160.0). Node.js also runs the development tests
+and the separate DOM experiment.
 
 ## Quick start
 
@@ -109,6 +111,23 @@ For a simulated UI demonstration, open
 browser. It uses synthetic accounts and performs no real sync operations.
 The [DOM launchers](experiments/dom-launchers/README.md) are a separate,
 experimental way to compare sidebar, header, and floating controls.
+
+## Claude → Codex imports
+
+The standalone [Claude → Codex importer](docs/claude-to-codex.md) previews a
+selected folder or session tree, then creates new Codex conversation snapshots
+using Codex's native import API. Titles, archive state, text, and readable tool
+records transfer. Unchanged revisions are skipped; changed revisions require an
+explicit new snapshot. Node.js and a compatible Codex CLI are required.
+
+```powershell
+.\Import-ClaudeToCodex.ps1 -Mode Choices -Source 'source@example.com'
+.\Import-ClaudeToCodex.ps1 -Source 'source@example.com' `
+    -Scope Folder -ScopeFolder 'C:\Projects\SampleProject'
+```
+
+Review the saved plan before importing. This initial feature is standalone;
+the in-app mod continues to handle Claude account-to-account sync.
 
 ## Undo
 
