@@ -15,6 +15,24 @@ That confirmation lasts only for this session. No global CLI login or saved sour
 choice is treated as Desktop's current account. A new session card is discovered
 after a turn or on the next 30-second check.
 
+**From** shows the current profile. **To** only offers profiles under other
+accounts; it also excludes other organizations under the current account.
+If no saved destination applies and there is exactly one profile under a
+different account, it is preselected. The picker uses an email when there is
+a label for the exact profile and a short account label otherwise. Use **Copy
+profile list** for the full profile IDs, session counts, and email sources.
+
+Pending local task suggestions can appear in a synced session until their
+original expiry. Sync leaves them for you to review and start in Claude and
+does not restore suggestions the receiving profile has already resolved.
+
+One-way sync repairs missing saved Claude wrap-ups and native turn-card settings.
+Use **All history** to check every session. Desktop uses these settings to show
+its native question card and keep it available when a session resumes. A question
+can come from the shared transcript even when Desktop saved no wrap-up. Desktop
+decides whether a transcript question is still current or was dismissed.
+Explicit destination settings stay in place.
+
 Auto-sync checks saved files every 30 seconds and 1.5 seconds after a main-agent
 turn completes. It uses PowerShell, without model calls. It starts paused in each
 session and after hot reload. Pause before switching accounts. Choosing another

@@ -61,6 +61,45 @@ function Apply-Plan($Context, $Plan) {
 }
 $id = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
 
+# Saved task proposals are presentation data. Sync must never recreate a
+# resolved offer or change what the destination already has for that task ID.
+$taskContext = New-Fixture
+$taskNow = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+function New-TaskFixture([string]$TaskId, [long]$Expiry=$taskNow+3600000) {
+    @{id=$TaskId; title='Review the fixture'; prompt='Open the test project'; tldr='Review'; context='fresh';
+      model='sonnet'; effort='medium'; useWorktree=$false; createdAt=$taskNow-7200000; expiresAt=$Expiry}
+}
+$plainTask = New-TaskFixture 'proposal-active'
+$expiredTask = New-TaskFixture 'proposal-expired' ($taskNow-1000)
+$offerTask = New-TaskFixture 'proposal-offer'; $offerTask['offer'] = @{choices=@('one')}
+$dismissedTask = New-TaskFixture 'proposal-dismissed'
+$startedTask = New-TaskFixture 'proposal-started'
+$localTask = New-TaskFixture 'proposal-existing'; $localTask.title = 'Destination version'
+$taskSource = Add-Record $taskContext A $id 'Same history' $false @{
+    backgroundTaskSuggestions=@($plainTask,$expiredTask,$offerTask,$dismissedTask,$startedTask,(New-TaskFixture 'proposal-existing'));
+    resolvedBackgroundTaskSuggestions=@{'proposal-started'='started'}
+}
+$taskTarget = Add-Record $taskContext B $id 'Same history' $false @{
+    backgroundTaskSuggestions=@($localTask); resolvedBackgroundTaskSuggestions=@{'proposal-dismissed'='dismissed'}
+}
+$taskNewId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
+[void](Add-Record $taskContext A $taskNewId 'Missing history' $false @{backgroundTaskSuggestions=@($plainTask,$expiredTask,$offerTask)})
+$taskPlan = New-CHPlan $taskContext
+$taskRows = @(Get-CHPreviewRows $taskContext $taskPlan)
+$taskUpdate = @($taskRows | Where-Object File -eq "local_$id.json")[0]
+Assert-Test ($taskUpdate.Action -eq 'Update' -and ($taskUpdate.ChangedFields -join ',') -eq 'backgroundTaskSuggestions') 'A suggestion alone is a visible, scoped history update'
+Assert-Test ($taskUpdate.Detail -notlike '*Open the test project*') 'Preview does not expose the suggested prompt'
+$taskBeforeSource = Get-CHFileHash $taskSource; $taskBeforeTarget = Get-CHFileHash $taskTarget
+$taskBackup = (Invoke-CHApply $taskContext $taskPlan $true 'A' | Where-Object { $_ -like 'Backup: *' }).Substring(8)
+$taskOutput = [IO.File]::ReadAllText($taskTarget) | ConvertFrom-Json
+$taskClone = [IO.File]::ReadAllText((Join-Path $taskContext.Config.Profiles[1].FullPath "local_$taskNewId.json")) | ConvertFrom-Json
+Assert-Test (($taskOutput.backgroundTaskSuggestions.id -join ',') -eq 'proposal-existing,proposal-active' -and
+    $taskOutput.backgroundTaskSuggestions[0].title -eq 'Destination version' -and
+    $taskOutput.resolvedBackgroundTaskSuggestions.'proposal-dismissed' -eq 'dismissed') 'Update preserves destination decisions and excludes expired, resolved, and interactive offers'
+Assert-Test ($taskClone.backgroundTaskSuggestions -is [array] -and $taskClone.backgroundTaskSuggestions.Count -eq 1 -and
+    $taskClone.backgroundTaskSuggestions[0].id -eq 'proposal-active' -and $null -eq $taskClone.resolvedBackgroundTaskSuggestions) 'New card gets only pending plain suggestions as an array'
+Assert-Test ((Get-CHFileHash $taskSource) -eq $taskBeforeSource -and @((New-CHPlan $taskContext).Report).Count -eq 0) 'Repeating sync leaves source and suggestions unchanged'
+
 # Verify the real guard before mocking it for isolated fixture tests.
 $ctx = New-Fixture
 $a = Add-Record $ctx 'A' $id
@@ -75,6 +114,136 @@ if (Get-Process -Name Claude -ErrorAction SilentlyContinue) {
     Assert-Test (-not [IO.Directory]::Exists($ctx.StateRoot)) 'Process guard creates no sync state'
 }
 function Assert-CHStopped { } # Only fixture calls below; live-mode validation is tested separately.
+Invoke-CHUndo $taskContext (Get-CHUndo $taskContext $taskBackup) | Out-Null
+Assert-Test ((Get-CHFileHash $taskTarget) -eq $taskBeforeTarget) 'Undo restores the original destination suggestion state byte for byte'
+
+$linkedContext = New-Fixture
+$childId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
+$missingChildId = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'
+$assistantId = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd'
+$olderTurn = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee'
+$wrapUp = @{description='Fixture recap'; needsUser='Choose a test case'; extra='Not in the native saved schema'}
+$linkedNote = @{messageUuid=$assistantId;sessionId="local_$childId";title='Fixture child';report='Saved note';at=2;batch=2}
+$unavailableNote = @{messageUuid=$assistantId;sessionId="local_$missingChildId";title='Unavailable child';report='Skip';at=3;batch=2}
+$linkedSource = Add-Record $linkedContext A $id 'Linked history' $false @{
+    lastAssistantUuid=$assistantId; turnWrapUp=$wrapUp; sideSessionNotes=@($linkedNote,$unavailableNote);
+    queuedSideSessionNotes=@(@{sessionId="local_$childId";body='Must not be queued in the destination'})
+}
+$linkedTarget = Add-Record $linkedContext B $id 'Linked history' $false @{lastAssistantUuid=$olderTurn}
+[void](Add-Record $linkedContext A $childId 'Fixture child' $false @{
+    spawnedFrom=@{sessionId="local_$id";sideSession=$true}; lastAssistantUuid=$assistantId; turnWrapUp=$wrapUp
+})
+$linkedPlan = New-CHPlan $linkedContext -Scope Session -ScopeSession "local_$id"
+$linkedRow = @(Get-CHPreviewRows $linkedContext $linkedPlan | Where-Object File -eq "local_$id.json")[0]
+Assert-Test ($linkedRow.Action -eq 'Update' -and $linkedRow.ChangedFields -contains 'turnWrapUp' -and
+    $linkedRow.ChangedFields -contains 'sideSessionNotes') 'Preview reports a newer saved wrap-up and historical note'
+$linkedBackup = Apply-Plan $linkedContext $linkedPlan
+$linkedOutput = [IO.File]::ReadAllText($linkedTarget) | ConvertFrom-Json
+$linkedChild = [IO.File]::ReadAllText((Join-Path $linkedContext.Config.Profiles[1].FullPath "local_$childId.json")) | ConvertFrom-Json
+Assert-Test ($linkedOutput.turnWrapUp.needsUser -eq 'Choose a test case' -and -not $linkedOutput.turnWrapUp.extra -and
+    $linkedChild.turnWrapUp.needsUser -eq 'Choose a test case') 'New cards and newer turns get only the saved native wrap-up fields'
+Assert-Test ($linkedOutput.sideSessionNotes.Count -eq 1 -and $linkedOutput.sideSessionNotes[0].sessionId -eq "local_$childId" -and
+    -not $linkedOutput.queuedSideSessionNotes) 'Only historical notes with a verified destination child are copied'
+$linkedOutput.PSObject.Properties.Remove('turnWrapUp'); $linkedOutput.PSObject.Properties.Remove('sideSessionNotes')
+[IO.File]::WriteAllBytes($linkedTarget, (ConvertTo-CHBytes $linkedOutput))
+$linkedRepair = New-CHPlan $linkedContext -Scope Session -ScopeSession "local_$id"
+$linkedRepairRow = @(Get-CHPreviewRows $linkedContext $linkedRepair | Where-Object File -eq "local_$id.json")[0]
+Assert-Test (($linkedRepairRow.ChangedFields -join ',') -eq 'sideSessionNotes') 'Repairs a missing historical note without re-opening a same-turn wrap-up'
+[void](Apply-Plan $linkedContext $linkedRepair)
+Assert-Test (@((New-CHPlan $linkedContext -Scope Session -ScopeSession "local_$id").Report).Count -eq 0) 'Repeated sync does not duplicate the linked-session note'
+
+$legacyWrapContext = New-Fixture
+$sameTurn = @{lastAssistantUuid=$assistantId; lastAssistantCliSessionId=$id;
+    postTurnSummaryFor=$assistantId; postTurnSummary=@{description='The fixture turn completed'}}
+$legacyWrapSource = Add-Record $legacyWrapContext A $id 'Same assistant turn' $false ($sameTurn + @{
+    turnWrapUp=@{description='Saved recap'; needsUser=$null}; turnBoxDeclared=$true; turnBoxMounted=$true; reportFindingsCard=$true
+})
+$legacyWrapTarget = Add-Record $legacyWrapContext B $id 'Same assistant turn' $false $sameTurn
+$legacySourceHash = Get-CHFileHash $legacyWrapSource; $legacyTargetHash = Get-CHFileHash $legacyWrapTarget
+$otherTurn = @{lastAssistantUuid=$olderTurn; lastAssistantCliSessionId=$childId; postTurnSummaryFor=$olderTurn;
+    postTurnSummary=@{description='Another turn completed'}; cwd='C:\outside';originCwd='C:\outside'}
+[void](Add-Record $legacyWrapContext A $childId 'Another missing wrap-up' $false ($otherTurn + @{turnWrapUp=@{description='Another recap'}}))
+$otherCopy = $otherTurn.Clone()
+$otherCopy.Remove('postTurnSummaryFor'); $otherCopy.Remove('postTurnSummary')
+$otherWrapTarget = Add-Record $legacyWrapContext B $childId 'Another missing wrap-up' $false $otherCopy
+$staleTurn = @{lastAssistantUuid=$assistantId; lastAssistantCliSessionId=$missingChildId; postTurnSummaryFor=$olderTurn}
+[void](Add-Record $legacyWrapContext A $missingChildId 'Older wrap-up' $false ($staleTurn + @{turnWrapUp=@{description='From an older turn'}}))
+[void](Add-Record $legacyWrapContext B $missingChildId 'Older wrap-up' $false $staleTurn)
+$bulkPlan = New-CHPlan $legacyWrapContext
+Assert-Test ($bulkPlan.Scope.Mode -eq 'All' -and $bulkPlan.WrapUpsRestored -eq 2 -and
+    @($bulkPlan.Report | Where-Object Action -eq 'Update').Count -eq 2) 'All-history sync repairs both current wrap-ups and skips the older one'
+$outsidePlan = New-CHPlan $legacyWrapContext -Scope Folder -ScopeFolder 'C:\outside'
+Assert-Test ($outsidePlan.WrapUpsRestored -eq 1 -and @($outsidePlan.Report)[0].File -eq "local_$childId.json") 'Folder scope repairs only the eligible wrap-up in that folder'
+$legacyPlan = New-CHPlan $legacyWrapContext -Scope Session -ScopeSession "local_$id"
+$legacyRow = @(Get-CHPreviewRows $legacyWrapContext $legacyPlan)[0]
+Assert-Test ($legacyRow.Action -eq 'Update' -and ($legacyRow.ChangedFields -join ',') -eq 'turnWrapUp,turnBoxMounted,turnBoxDeclared') 'Preview includes the missing wrap-up and both native turn-box settings'
+$legacyBackup = Apply-Plan $legacyWrapContext $legacyPlan
+$repaired = [IO.File]::ReadAllText($legacyWrapTarget) | ConvertFrom-Json
+Assert-Test ($repaired.turnWrapUp.description -eq 'Saved recap' -and
+    $null -eq $repaired.turnWrapUp.PSObject.Properties['needsUser'] -and
+    $repaired.postTurnSummaryFor -eq $assistantId -and $repaired.turnBoxMounted -eq $true -and
+    $repaired.turnBoxDeclared -eq $true -and -not $repaired.reportFindingsCard -and
+    (Get-CHFileHash $legacyWrapSource) -eq $legacySourceHash) 'Repairs the native turn-box settings without copying other settings or editing the source'
+Assert-Test ((New-CHPlan $legacyWrapContext -Scope Session -ScopeSession "local_$id").Operations.Count -eq 0) 'Repeated scoped repair is a byte-identical no-op'
+$legacyDisplayCopy = $repaired | Select-Object * -ExcludeProperty turnBoxDeclared
+[IO.File]::WriteAllBytes($legacyWrapTarget, (ConvertTo-CHBytes $legacyDisplayCopy))
+$displayPlan = New-CHPlan $legacyWrapContext -Scope Session -ScopeSession "local_$id"
+$displayRow = @(Get-CHPreviewRows $legacyWrapContext $displayPlan)[0]
+Assert-Test ($displayPlan.WrapUpsRestored -eq 1 -and ($displayRow.ChangedFields -join ',') -eq 'turnBoxDeclared') 'A previous display-only repair adds the missing resume setting even with a delivery receipt'
+[void](Apply-Plan $legacyWrapContext $displayPlan)
+$displayCopy = [IO.File]::ReadAllText($legacyWrapTarget) | ConvertFrom-Json
+$displayCopy.turnBoxMounted = $false
+[IO.File]::WriteAllBytes($legacyWrapTarget, (ConvertTo-CHBytes $displayCopy))
+Assert-Test ((New-CHPlan $legacyWrapContext -Scope Session -ScopeSession "local_$id").WrapUpsRestored -eq 0) 'Explicitly disabled destination display stays disabled'
+[IO.File]::WriteAllBytes($legacyWrapTarget, (ConvertTo-CHBytes $repaired))
+Invoke-CHUndo $legacyWrapContext (Get-CHUndo $legacyWrapContext $legacyBackup) | Out-Null
+Assert-Test ((Get-CHFileHash $legacyWrapTarget) -eq $legacyTargetHash -and
+    @((New-CHPlan $legacyWrapContext -Scope Session -ScopeSession "local_$id").Report | Where-Object Action -eq 'Update').Count -eq 1) 'Undo restores both the card and its delivery receipt'
+[void](Apply-Plan $legacyWrapContext (New-CHPlan $legacyWrapContext -Scope Session -ScopeSession "local_$id"))
+[IO.File]::WriteAllBytes($legacyWrapTarget, (ConvertTo-CHBytes ($repaired | Select-Object * -ExcludeProperty turnWrapUp)))
+$rewritten = [IO.File]::ReadAllText($legacyWrapSource) | ConvertFrom-Json
+$rewritten.turnWrapUp.description = 'Reworded recap for the same turn'
+[IO.File]::WriteAllBytes($legacyWrapSource, (ConvertTo-CHBytes $rewritten))
+Assert-Test ((New-CHPlan $legacyWrapContext -Scope Session -ScopeSession "local_$id").Operations.Count -eq 0) 'Dismissing a restored card stays dismissed even after source wording changes'
+$finishBulk = New-CHPlan $legacyWrapContext
+Assert-Test ($finishBulk.WrapUpsRestored -eq 1 -and @($finishBulk.Report | Where-Object Action -eq 'Update')[0].File -eq "local_$childId.json") 'Bulk sync repairs the other card without restoring the dismissed one'
+[void](Apply-Plan $legacyWrapContext $finishBulk)
+Assert-Test (([IO.File]::ReadAllText($otherWrapTarget) | ConvertFrom-Json).turnWrapUp.description -eq 'Another recap' -and
+    (New-CHPlan $legacyWrapContext).WrapUpsRestored -eq 0) 'Bulk repair saves the remaining current card and is idempotent'
+
+$transcriptQuestionContext = New-Fixture
+[void](Add-Record $transcriptQuestionContext A $id 'Transcript question without a saved recap' $false ($sameTurn + @{
+    turnBoxMounted=$true; turnBoxDeclared=$true
+    promptAppendSnapshot=@{append='Source prompt';toolSets=@{turnBox=$true;sideSessions=$true}}
+}))
+$transcriptQuestionTarget = Add-Record $transcriptQuestionContext B $id 'Transcript question without a saved recap' $false ($sameTurn + @{
+    turnBoxDeclared=$true
+    promptAppendSnapshot=@{append='Destination prompt';toolSets=@{turnBox=$false;sideSessions=$false}}
+})
+$questionPlan = New-CHPlan $transcriptQuestionContext
+$questionRow = @(Get-CHPreviewRows $transcriptQuestionContext $questionPlan)[0]
+Assert-Test ($questionPlan.WrapUpsRestored -eq 1 -and ($questionRow.ChangedFields -join ',') -eq 'turnBoxMounted,promptAppendSnapshot.toolSets.turnBox') 'All-history sync repairs the missing display flag and stale resume snapshot without requiring a recap'
+[void](Apply-Plan $transcriptQuestionContext $questionPlan)
+$questionCopy = [IO.File]::ReadAllText($transcriptQuestionTarget) | ConvertFrom-Json
+Assert-Test ($questionCopy.turnBoxMounted -eq $true -and $questionCopy.turnBoxDeclared -eq $true -and
+    $questionCopy.promptAppendSnapshot.toolSets.turnBox -eq $true -and
+    $questionCopy.promptAppendSnapshot.append -ceq 'Destination prompt' -and
+    $questionCopy.promptAppendSnapshot.toolSets.sideSessions -eq $false -and
+    $null -eq $questionCopy.PSObject.Properties['turnWrapUp'] -and
+    (New-CHPlan $transcriptQuestionContext).Operations.Count -eq 0) 'Turn-box repair changes only its own settings and is idempotent'
+$questionCopy.promptAppendSnapshot.toolSets.turnBox = $false
+[IO.File]::WriteAllBytes($transcriptQuestionTarget, (ConvertTo-CHBytes $questionCopy))
+$snapshotOnlyPlan = New-CHPlan $transcriptQuestionContext
+Assert-Test ((@(Get-CHPreviewRows $transcriptQuestionContext $snapshotOnlyPlan)[0].ChangedFields -join ',') -eq
+    'promptAppendSnapshot.toolSets.turnBox') 'A stale resume snapshot alone qualifies for repair'
+$questionCopy.promptAppendSnapshot.toolSets | Add-Member -NotePropertyName noWrapUp -NotePropertyValue $true
+[IO.File]::WriteAllBytes($transcriptQuestionTarget, (ConvertTo-CHBytes $questionCopy))
+Assert-Test ((New-CHPlan $transcriptQuestionContext).Operations.Count -eq 0) 'A destination resume snapshot that disables wrap-ups is respected'
+$questionCopy.promptAppendSnapshot.toolSets.PSObject.Properties.Remove('noWrapUp')
+$optedOut = $questionCopy | Select-Object * -ExcludeProperty turnBoxMounted
+$optedOut.turnBoxDeclared = $false
+[IO.File]::WriteAllBytes($transcriptQuestionTarget, (ConvertTo-CHBytes $optedOut))
+Assert-Test ((New-CHPlan $transcriptQuestionContext).Operations.Count -eq 0) 'An explicit destination resume opt-out also prevents adding the mounted flag'
 $plan = New-BothPlan $ctx ''
 Assert-Test (@($plan.Report | Where-Object Action -eq 'Add').Count -eq 1) 'Missing session is planned'
 Assert-Test (-not [IO.Directory]::Exists($ctx.StateRoot)) 'Plan is read-only'

@@ -320,6 +320,77 @@ function Select-CHFields($Record, [string[]]$Fields) {
     }
     [pscustomobject]$out
 }
+function Get-CHNewTaskSuggestions($Source, $Target, [long]$Now) {
+    # Copy only plain, pending proposals. Offers, cloud/workflow state, and
+    # destination decisions belong to the account that created them.
+    if ($Source.isArchived -or $Source.backgroundTaskSuggestions -isnot [array]) { return }
+    $existing = $Target.backgroundTaskSuggestions
+    if ($null -ne $existing -and $existing -isnot [array]) { return }
+    $sourceResolved = $Source.resolvedBackgroundTaskSuggestions
+    $targetResolved = $Target.resolvedBackgroundTaskSuggestions
+    if (($null -ne $sourceResolved -and $sourceResolved -isnot [pscustomobject]) -or
+        ($null -ne $targetResolved -and $targetResolved -isnot [pscustomobject])) { return }
+    $room = 20 - @($existing | Where-Object { $null -ne $_ }).Count
+    $seen = @{}
+    foreach ($suggestion in $existing) { if ($suggestion.id -is [string]) { $seen[$suggestion.id] = $true } }
+    $fields = @('id', 'title', 'prompt', 'tldr', 'context', 'model', 'effort', 'useWorktree', 'createdAt', 'expiresAt')
+    foreach ($suggestion in $Source.backgroundTaskSuggestions) {
+        if ($room -le 0) { break }
+        if ($suggestion -isnot [pscustomobject] -or $suggestion.id -isnot [string] -or
+            $suggestion.id -notmatch '^[A-Za-z0-9_-]{1,128}$' -or $seen.ContainsKey($suggestion.id) -or
+            ($null -ne $sourceResolved -and $sourceResolved.PSObject.Properties[$suggestion.id]) -or
+            ($null -ne $targetResolved -and $targetResolved.PSObject.Properties[$suggestion.id])) { continue }
+        if (@($suggestion.PSObject.Properties.Name | Where-Object { $_ -cnotin $fields }).Count -or
+            $suggestion.title -isnot [string] -or [string]::IsNullOrWhiteSpace($suggestion.title) -or
+            $suggestion.prompt -isnot [string] -or [string]::IsNullOrWhiteSpace($suggestion.prompt) -or
+            ($suggestion.expiresAt -isnot [long] -and $suggestion.expiresAt -isnot [int]) -or $suggestion.expiresAt -le $Now -or
+            ($suggestion.createdAt -isnot [long] -and $suggestion.createdAt -isnot [int]) -or
+            $suggestion.createdAt -gt $suggestion.expiresAt -or
+            ($null -ne $suggestion.useWorktree -and $suggestion.useWorktree -isnot [bool]) -or
+            @('tldr', 'context', 'model', 'effort' | Where-Object { $null -ne $suggestion.$_ -and $suggestion.$_ -isnot [string] }).Count) { continue }
+        $seen[$suggestion.id] = $true
+        $room--
+        $suggestion
+    }
+}
+function Get-CHSavedWrapUp($Record) {
+    $wrap = $Record.turnWrapUp
+    if ($Record.isArchived -or $Record.lastAssistantUuid -notmatch ('^' + $script:GuidPattern + '$') -or
+        ($Record.postTurnSummaryFor -and $Record.postTurnSummaryFor -ne $Record.lastAssistantUuid) -or
+        ($Record.lastAssistantCliSessionId -and $Record.lastAssistantCliSessionId -ne $Record.cliSessionId) -or
+        $wrap -isnot [pscustomobject] -or $wrap.description -isnot [string] -or [string]::IsNullOrWhiteSpace($wrap.description) -or
+        ($null -ne $wrap.needsUser -and $wrap.needsUser -isnot [string])) { return }
+    $saved = [ordered]@{description=$wrap.description}
+    if ($wrap.needsUser -is [string]) { $saved.needsUser = $wrap.needsUser }
+    [pscustomobject]$saved
+}
+function Get-CHSideNoteKey($Note) {
+    "$($Note.messageUuid)/$($Note.sessionId)/$($Note.at)/$($Note.batch)"
+}
+function Get-CHNewSideNotes($Source, $Destination, $SourceRecords, $DestinationCards, $Tombstones) {
+    if ($Source.sideSessionNotes -isnot [array] -or
+        ($null -ne $Destination.sideSessionNotes -and $Destination.sideSessionNotes -isnot [array])) { return }
+    $room = 32 - @($Destination.sideSessionNotes | Where-Object { $null -ne $_ }).Count
+    $seen = @{}
+    foreach ($note in $Destination.sideSessionNotes) { $seen[(Get-CHSideNoteKey $note)] = $true }
+    foreach ($note in $Source.sideSessionNotes) {
+        if ($room -le 0) { break }
+        if ($note -isnot [pscustomobject] -or $note.sessionId -notmatch ('^local_' + $script:GuidPattern + '$') -or
+            $note.messageUuid -notmatch ('^' + $script:GuidPattern + '$') -or $note.title -isnot [string] -or
+            $note.report -isnot [string] -or ($note.at -isnot [long] -and $note.at -isnot [int]) -or
+            ($null -ne $note.batch -and $note.batch -isnot [long] -and $note.batch -isnot [int])) { continue }
+        $key = Get-CHSideNoteKey $note
+        if ($seen.ContainsKey($key)) { continue }
+        $childFile = $note.sessionId + '.json'
+        $child = $DestinationCards[$childFile]; $sourceChild = $SourceRecords[$childFile]
+        if (-not $child -or -not $sourceChild -or $sourceChild.Pending -or -not $child.cliSessionId -or
+            $Tombstones.ContainsKey($note.sessionId.Substring(6)) -or $Tombstones.ContainsKey($child.cliSessionId) -or
+            (Get-CHCliRelation $sourceChild.Record $child) -ne 'Same') { continue }
+        $seen[$key] = $true
+        $room--
+        Select-CHFields $note @('messageUuid', 'sessionId', 'title', 'report', 'at', 'batch')
+    }
+}
 function Get-CHViewHash($Record) {
     # Prefix separates pointer-aware hashes from legacy history-only baselines.
     # Old entries still prevent resurrection; they never authorize pointer changes.
@@ -502,19 +573,27 @@ function New-CHPlan($Context, [string]$Winner='', [bool]$WithScheduled=$false,
     $stateFile = Assert-CHPath (Join-Path $Context.StateRoot 'baseline.json') $Context.StateRoot
     $stateBefore = Get-CHFileHash $stateFile
     $baseline = @{}
+    $wrapReceipts = @{}
     if ([IO.File]::Exists($stateFile)) {
         $old = [IO.File]::ReadAllText($stateFile) | ConvertFrom-Json
         if ($old.FormatVersion -ne 1 -or $old.Signature -ne $Context.Signature) { throw 'Sync state belongs to another profile pair. Use a separate tool/config folder.' }
         foreach ($entry in $old.Entries.PSObject.Properties) { $baseline[$entry.Name] = [string]$entry.Value }
+        foreach ($key in $old.WrapUpReceipts) {
+            if ($key -isnot [string] -or $key -notmatch '^[0-9a-f]{64}$') { throw 'Invalid wrap-up receipt in sync state.' }
+            $wrapReceipts[$key] = $true
+        }
     }
     $next = @{} + $baseline
     $reconciled = @{}
     $ops = [Collections.Generic.List[object]]::new()
     $report = [Collections.Generic.List[object]]::new()
+    $wrapUpsRestored = 0
     $allNames = @(@($data.Records[$aName].Keys) + @($data.Records[$bName].Keys) | Sort-Object -Unique)
     $scopeCount = if ($Direction -eq 'Both') { $allNames.Count } else { $selection.Count }
+    $now = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
     foreach ($name in $allNames) {
         if ($null -ne $selectedFiles -and -not $selectedFiles.ContainsKey($name)) { continue }
+        $newTasks = $null
         $a = $data.Records[$aName][$name]; $b = $data.Records[$bName][$name]
         if ($directionSource -and -not $data.Records[$directionSource].ContainsKey($name)) {
             $report.Add([pscustomobject]@{File=$name; Action='Skipped'; Detail='Destination-only card; reverse copying disabled'})
@@ -540,10 +619,18 @@ function New-CHPlan($Context, [string]$Winner='', [bool]$WithScheduled=$false,
             if ($relation -ne 'Same' -and $Resolution -ne 'Profile') {
                 $report.Add([pscustomobject]@{File=$name; Action='Conflict'; Detail='CLI continuation differs; choose -Policy Profile -WinnerProfile for the continuing source'}); continue
             }
-            if ($a.ViewHash -eq $b.ViewHash) { $next[$name] = $a.ViewHash; $reconciled[$name] = $true; continue }
             $sourceName = $null
             $decision = ''
-            if ($Resolution -eq 'Profile') { $sourceName = $winningName; $decision = 'chosen profile wins' }
+            if ($a.ViewHash -eq $b.ViewHash) {
+                if ($directionSource) {
+                    $from = $data.Records[$directionSource][$name].Record
+                    $to = $data.Records[$directionTarget][$name].Record
+                    $newTasks = @(Get-CHNewTaskSuggestions $from $to $now)
+                    if ($newTasks.Count) { $sourceName = $directionSource; $decision = 'saved history matches' }
+                }
+                if (-not $sourceName) { $next[$name] = $a.ViewHash; $reconciled[$name] = $true; continue }
+            }
+            elseif ($Resolution -eq 'Profile') { $sourceName = $winningName; $decision = 'chosen profile wins' }
             elseif ($baseline.ContainsKey($name)) {
                 $aBaselineHash = $a.ViewHash; $bBaselineHash = $b.ViewHash
                 # Legacy history-only hashes remain useful only after the full
@@ -609,6 +696,14 @@ function New-CHPlan($Context, [string]$Winner='', [bool]$WithScheduled=$false,
             $out | Add-Member -NotePropertyName steeredByRemoteClient -NotePropertyValue $false
             $action = 'Add'
         }
+        if ($directionSource -and (-not $target -or $source.Record.cliSessionId -eq $target.Record.cliSessionId)) {
+            if ($null -eq $newTasks) { $newTasks = @(Get-CHNewTaskSuggestions $source.Record $target.Record $now) }
+            if ($newTasks.Count) {
+                $tasks = @($out.backgroundTaskSuggestions | Where-Object { $null -ne $_ }) + $newTasks
+                $out | Add-Member -NotePropertyName backgroundTaskSuggestions -NotePropertyValue $tasks -Force
+                $decision += "; $($newTasks.Count) pending task suggestion(s) added"
+            }
+        }
         $op = New-CHOperation $Context 'desktop' (Join-Path $profile.Path $name) (ConvertTo-CHBytes $out)
         # Use the hashes from the read snapshot, rather than silently accepting a later write.
         $op.Before = if ($target) { $target.FileHash } else { 'ABSENT' }
@@ -668,6 +763,108 @@ function New-CHPlan($Context, [string]$Winner='', [bool]$WithScheduled=$false,
             $removed = $true
         }
     } while ($removed)
+    $noteReads = @{}
+    if ($directionSource) {
+        # A recorded note is display history. Wait until the projected cards are
+        # validated so a note cannot point at a rejected or missing child.
+        $sourceCards = $data.Records[$directionSource]
+        $targetCards = $projected[$directionTarget]
+        $targetProfile = @($c.Profiles | Where-Object Name -eq $directionTarget)[0]
+        $updates = @{}; foreach ($entry in $cardOperations) { $updates[$entry.File] = $entry.Operation }
+        $rows = @{}; foreach ($row in $report) { $rows[$row.File] = $row }
+        foreach ($name in $reconciled.Keys) {
+            $sourceEntry = $sourceCards[$name]; $source = $sourceEntry.Record; $target = $targetCards[$name]
+            $before = $data.Records[$directionTarget][$name]
+            if (-not $target -or $source.cliSessionId -ne $target.cliSessionId) { continue }
+            $notes = @(Get-CHNewSideNotes $source $target $sourceCards $targetCards $data.Tombstones)
+            $wrap = $null; $removeWrap = $false; $turnBoxFields = @(); $repairTurnBoxSnapshot = $false
+            if ($sourceEntry.HasTranscript -and $source.lastAssistantUuid -eq $target.lastAssistantUuid) {
+                $advanced = -not $before -or $source.lastAssistantUuid -ne $before.Record.lastAssistantUuid -or
+                    $source.cliSessionId -ne $before.Record.cliSessionId
+                $savedWrap = Get-CHSavedWrapUp $source
+                if ($savedWrap -and -not $target.isArchived) {
+                    $receipt = Get-CHHash (ConvertTo-CHBytes @($directionTarget, $name, $source.cliSessionId, $source.lastAssistantUuid))
+                    # A legacy copy can be missing the card even though all the
+                    # history fields match. Require both records to identify the
+                    # same current turn. Receipts keep later clears cleared.
+                    $repair = $before -and
+                        $source.postTurnSummaryFor -eq $source.lastAssistantUuid -and
+                        $target.postTurnSummaryFor -eq $source.lastAssistantUuid -and
+                        (-not $source.lastAssistantCliSessionId -or $source.lastAssistantCliSessionId -eq $source.cliSessionId) -and
+                        (-not $before.Record.lastAssistantCliSessionId -or $before.Record.lastAssistantCliSessionId -eq $source.cliSessionId)
+                    if (-not $wrapReceipts.ContainsKey($receipt) -and ($advanced -or ($repair -and -not $target.turnWrapUp))) {
+                        $wrap = $savedWrap
+                        $wrapReceipts[$receipt] = $true
+                    } elseif (-not $advanced -and (Get-CHSavedWrapUp $target)) {
+                        $wrapReceipts[$receipt] = $true
+                    }
+                }
+                # Desktop shows the turn box from the mounted flag and uses the
+                # declared flag to configure it on resume. Native transcript
+                # questions can exist even when Desktop saved no recap.
+                $turnBoxFields = @('turnBoxMounted', 'turnBoxDeclared')
+                if ($source.isArchived -or $target.isArchived -or
+                    $source.noWrapUp -eq $true -or $target.noWrapUp -eq $true -or
+                    $source.promptAppendSnapshot.toolSets.noWrapUp -eq $true -or
+                    $target.promptAppendSnapshot.toolSets.noWrapUp -eq $true -or
+                    $source.lastAssistantUuid -notmatch ('^' + $script:GuidPattern + '$') -or
+                    ($null -eq $target.turnBoxDeclared -and $target.turnBriefCard -is [bool] -and -not $target.turnBriefCard) -or
+                    @($turnBoxFields | Where-Object {
+                        $source.$_ -isnot [bool] -or -not $source.$_ -or
+                        ($null -ne $target.PSObject.Properties[$_] -and
+                            ($target.$_ -isnot [bool] -or -not $target.$_))
+                    }).Count) {
+                    $turnBoxFields = @()
+                } else {
+                    $turnBoxFields = @($turnBoxFields | Where-Object { $null -eq $target.PSObject.Properties[$_] })
+                    # Desktop can veto mounting on resume when its previous tool
+                    # set recorded the turn box as absent. Repair only this bit.
+                    $sourceTurnBox = $source.promptAppendSnapshot.toolSets.turnBox
+                    $targetTurnBox = $target.promptAppendSnapshot.toolSets.turnBox
+                    $repairTurnBoxSnapshot = $sourceTurnBox -is [bool] -and $sourceTurnBox -and
+                        $targetTurnBox -is [bool] -and -not $targetTurnBox
+                }
+                $removeWrap = $advanced -and -not $wrap -and $null -ne $target.turnWrapUp
+            }
+            $repairTurnBox = $turnBoxFields.Count -or $repairTurnBoxSnapshot
+            if (-not $notes.Count -and -not $wrap -and -not $removeWrap -and -not $repairTurnBox) { continue }
+            foreach ($note in $notes) { $noteReads[$note.sessionId + '.json'] = $true }
+            $out = [Text.Encoding]::UTF8.GetString((ConvertTo-CHBytes $target)) | ConvertFrom-Json
+            $details = @()
+            if ($notes.Count) {
+                $merged = @($out.sideSessionNotes | Where-Object { $null -ne $_ }) + $notes
+                $out | Add-Member -NotePropertyName sideSessionNotes -NotePropertyValue $merged -Force
+                $details += "$($notes.Count) saved linked-session note(s) added"
+            }
+            if ($wrap) {
+                $out | Add-Member -NotePropertyName turnWrapUp -NotePropertyValue $wrap -Force
+                if ($source.lastAssistantCliSessionId -eq $source.cliSessionId) {
+                    $out | Add-Member -NotePropertyName lastAssistantCliSessionId -NotePropertyValue $source.cliSessionId -Force
+                }
+                $details += 'Saved Claude wrap-up restored'
+            } elseif ($removeWrap) {
+                $out.PSObject.Properties.Remove('turnWrapUp')
+                $details += 'Previous turn wrap-up cleared'
+            }
+            if ($repairTurnBox) {
+                foreach ($field in $turnBoxFields) { $out | Add-Member -NotePropertyName $field -NotePropertyValue $true }
+                if ($repairTurnBoxSnapshot) { $out.promptAppendSnapshot.toolSets.turnBox = $true }
+                $details += 'Native Claude turn card settings restored'
+            }
+            if ($wrap -or $repairTurnBox) { $wrapUpsRestored++ }
+            $bytes = ConvertTo-CHBytes $out
+            $detail = $details -join '; '
+            if ($updates.ContainsKey($name)) {
+                $updates[$name].Bytes = $bytes; $updates[$name].After = Get-CHHash $bytes
+                $rows[$name].Detail += "; $detail"
+            } else {
+                $op = New-CHOperation $Context 'desktop' (Join-Path $targetProfile.Path $name) $bytes
+                $op.Before = $before.FileHash
+                $ops.Add($op)
+                $report.Add([pscustomobject]@{File=$name; Action='Update'; Detail=$detail; ArchiveChanged=$false})
+            }
+        }
+    }
     # One-way sync never repairs the source cache, even when cards agree.
     foreach ($p in $c.Profiles) {
         if ($directionTarget -and $p.Name -ne $directionTarget) { continue }
@@ -701,12 +898,14 @@ function New-CHPlan($Context, [string]$Winner='', [bool]$WithScheduled=$false,
     }
     $ordered = [ordered]@{}
     foreach ($key in @($next.Keys | Sort-Object)) { $ordered[$key] = $next[$key] }
-    $stateOp = New-CHOperation $Context 'state' 'baseline.json' (ConvertTo-CHBytes ([ordered]@{FormatVersion=1; Signature=$Context.Signature; Entries=$ordered}))
+    $state = [ordered]@{FormatVersion=1; Signature=$Context.Signature; Entries=$ordered}
+    if ($wrapReceipts.Count) { $state.WrapUpReceipts = @($wrapReceipts.Keys | Sort-Object) }
+    $stateOp = New-CHOperation $Context 'state' 'baseline.json' (ConvertTo-CHBytes $state)
     $stateOp.Before = $stateBefore
     if ($stateOp.Before -ne $stateOp.After) { $ops.Add($stateOp) }
     $readFiles = @{}
     if ($null -ne $selectedFiles) {
-        foreach ($name in $selectedFiles.Keys) { $readFiles[$name] = $true }
+        foreach ($name in @($selectedFiles.Keys) + @($noteReads.Keys)) { $readFiles[$name] = $true }
         do {
             $added = $false
             foreach ($profileRecords in $data.Records.Values) {
@@ -719,7 +918,7 @@ function New-CHPlan($Context, [string]$Winner='', [bool]$WithScheduled=$false,
             }
         } while ($added)
     }
-    [pscustomobject]@{Operations=$ops; Report=$report; Inventory=$data.Inventory; Snapshot=$data;
+    [pscustomobject]@{Operations=$ops; Report=$report; Inventory=$data.Inventory; Snapshot=$data; WrapUpsRestored=$wrapUpsRestored;
         Scope=[pscustomobject]@{Mode=$Scope; Folder=$ScopeFolder; Session=$ScopeSession; Count=$scopeCount}; SelectedFiles=$selectedFiles; ReadFiles=$readFiles;
         Direction=$Direction; SourceProfile=$directionSource; TargetProfile=$directionTarget; Policy=$Resolution}
 }
@@ -754,11 +953,14 @@ function Get-CHPreviewRows($Context, $Plan) {
         $title = if ($sourceState) { $sourceState.Title } elseif ($before) { $before.Title } else { 'Untitled session' }
         $changed = @()
         if ($planned.ContainsKey($file)) {
-            $changed = @(foreach ($field in $script:SyncFields) {
+            $changed = @(foreach ($field in $script:SyncFields + @('backgroundTaskSuggestions', 'turnWrapUp', 'turnBoxMounted', 'turnBoxDeclared', 'sideSessionNotes')) {
                 $beforeFields = if ($null -ne $beforeRecord) { Select-CHFields $beforeRecord @($field) } else { [pscustomobject]@{} }
                 $afterFields = Select-CHFields $afterRecord @($field)
                 if ((Get-CHHash (ConvertTo-CHBytes $beforeFields)) -ne (Get-CHHash (ConvertTo-CHBytes $afterFields))) { $field }
             })
+            if ($beforeRecord.promptAppendSnapshot.toolSets.turnBox -ne $afterRecord.promptAppendSnapshot.toolSets.turnBox) {
+                $changed += 'promptAppendSnapshot.toolSets.turnBox'
+            }
         }
         [pscustomobject]@{File=$file; Title=$title; Action=$(if ($entry) { $entry.Action } else { 'Unchanged' });
             Folder=$(if ($source) { Get-CHFolder $source.Record } else { Get-CHFolder $target.Record });

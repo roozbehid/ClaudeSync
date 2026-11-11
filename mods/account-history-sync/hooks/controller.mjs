@@ -1,15 +1,23 @@
 import {createCodexController} from './codex-controller.mjs';
 const PROFILE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\\[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
+export function profileAccount(id) { return id.split('\\')[0].toLowerCase(); }
+export function isOtherAccount(source, target) {
+  return Boolean(source && target && profileAccount(source) !== profileAccount(target));
+}
 
 export function describeResult(result) {
   const mode = result.Action === 'Plan' ? 'Preview' : 'Synced';
-  return `${mode}: ${result.Additions ?? 0} added, ${result.Updates ?? 0} updated, ${result.Conflicts ?? 0} conflicts, ${result.Skipped ?? 0} skipped.`;
+  const wraps = result.WrapUpsRestored;
+  const wrapStatus = wraps > 0 ? ` ${wraps} Claude turn card${wraps === 1 ? '' : 's'} ${result.Action === 'Plan' ? 'to repair' : 'repaired'}.` : '';
+  return `${mode}: ${result.Additions ?? 0} added, ${result.Updates ?? 0} updated, ${result.Conflicts ?? 0} conflicts, ${result.Skipped ?? 0} skipped.${wrapStatus}`;
 }
 
 export function createController() {
   const codex = createCodexController();
   const view = {
-    profiles: [], source: '', sourceCandidates: [], target: '', enabled: false, busy: false,
+    profiles: [], source: '', sourceCandidates: [], target: '', enabled: false, busy: false, spinner: '',
     status: 'Finding the account for this session…', error: '',
     backup: '', report: [], previewRows: [], previewFilter: 'all', previewChanges: 'all', previewSearch: '', previewPage: 0,
     selectedPreview: '', configPath: '', lastSync: '', copyStatus: '',
@@ -24,10 +32,32 @@ export function createController() {
   let ended = false;
   let interval = null;
   let debounce = null;
+  let spinnerTimer = null;
   let revision = 0;
   let scopeSelections = {};
 
+  function defaultDestination(source) {
+    if (!source) return '';
+    const otherAccounts = view.profiles.filter(p => isOtherAccount(source, p.Id));
+    return otherAccounts.length === 1 ? otherAccounts[0].Id : '';
+  }
+
+  function validateDestination(source, target) {
+    if (source && target && !isOtherAccount(source, target)) throw new Error('Choose a different account.');
+    if (target && !view.profiles.some(p => p.Id === target)) throw new Error('The destination is no longer available. Refresh accounts.');
+  }
+
   function redraw() { api.redraw('ui.render'); }
+  function startSpinner() {
+    let frame = 0;
+    view.spinner = SPINNER[frame];
+    spinnerTimer = api.every(160, () => {
+      if (!view.busy || ended) return;
+      view.spinner = SPINNER[++frame % SPINNER.length];
+      redraw();
+    });
+  }
+  function stopSpinner() { spinnerTimer?.cancel(); spinnerTimer = null; view.spinner = ''; }
   async function remember(key, value) {
     try { await api.storeSet(key, value); }
     catch { view.notice = 'Could not remember preferences or recent results. Any backup already created remains on disk.'; redraw(); }
@@ -128,7 +158,7 @@ export function createController() {
   function selectedPair(validateScope = true) {
     if (!PROFILE_ID.test(view.source)) throw new Error('Confirm which account is open in Sync settings first.');
     if (!PROFILE_ID.test(view.target)) throw new Error('Choose an inactive destination account first.');
-    if (view.source === view.target) throw new Error('Source and destination must be different.');
+    validateDestination(view.source, view.target);
     if (!view.profiles.some(p => p.Id === view.source) || !view.profiles.some(p => p.Id === view.target)) {
       throw new Error('A selected profile is no longer available. Refresh profiles.');
     }
@@ -184,7 +214,7 @@ export function createController() {
   async function run(label, work) {
     if (ended || running) return null;
     if(codex.hasPending()){view.status='A Codex import request is still running. Wait before starting Claude history sync.';redraw();return null;}
-    view.busy = true; view.error = ''; view.status = label; redraw();
+    view.busy = true; view.error = ''; view.status = label; startSpinner(); redraw();
     // Promise.resolve defers work until running is assigned, including synchronous failures.
     running = Promise.resolve().then(work).catch(async error => {
       view.enabled = false;
@@ -192,7 +222,7 @@ export function createController() {
       view.status = 'Sync paused after an error.';
       await release();
       return null;
-    }).finally(() => { running = null; view.busy = false; redraw(); });
+    }).finally(() => { running = null; view.busy = false; stopSpinner(); redraw(); });
     return running;
   }
   async function sync(automatic = false) {
@@ -237,10 +267,11 @@ export function createController() {
         if (previousSource) await release();
       }
       if (view.target && !view.profiles.some(p => p.Id === view.target)) { view.target = ''; view.enabled = false; }
-      if (view.target === view.source) view.target = '';
+      if (view.source && view.target && !isOtherAccount(view.source, view.target)) { view.target = ''; view.enabled = false; }
+      if (view.source && !view.target && previousSource !== view.source) view.target = defaultDestination(view.source);
       if (previousSource === view.source && previousTarget !== view.target && wasEnabled) await release();
       if (previousSource !== view.source || previousTarget !== view.target) { clearPreview(); resetScope(); restoreScope(); }
-      view.status = view.source ? 'This account → inactive destination. Choose a destination and sync.' :
+      view.status = view.source ? (view.target ? 'Check the destination, then preview or sync.' : 'Choose an inactive destination.') :
         view.sourceCandidates.length > 1 ? 'This session exists in several accounts. Confirm the open account in Sync settings.' :
         'No account folder identifies this session yet. Confirm the open account in Sync settings, or refresh after a turn.';
       return result;
@@ -251,9 +282,13 @@ export function createController() {
     if (source && (!view.profiles.some(p => p.Id === source) || (view.sourceCandidates.length && !view.sourceCandidates.includes(source)))) {
       throw new Error('The chosen source does not contain this session. Refresh profiles.');
     }
+    validateDestination(source, target);
     // Confirming an ambiguous source is session-local, never a saved login assumption.
+    const confirmingSource = !view.source && !!source;
     await pause();
     if (view.source && source !== view.source) throw new Error('The current source changed while waiting. Choose the destination again.');
+    validateDestination(source, target);
+    if (confirmingSource && !target) target = defaultDestination(source);
     const changedPair = view.source !== source || view.target !== target;
     if (changedPair) resetScope();
     view.source = source; view.target = target;
@@ -295,7 +330,7 @@ export function createController() {
     codex.stop();
     revision += 1;
     ended = true; view.enabled = false;
-    interval?.cancel(); debounce?.cancel();
+    interval?.cancel(); debounce?.cancel(); stopSpinner();
   }
   async function initialize(adapter) {
     api = adapter;

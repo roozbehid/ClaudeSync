@@ -35,6 +35,9 @@ try {
         }
     }
     function Assert-SessionSource($Context) {
+        if ($Context.Config.Profiles[0].AccountId -eq $Context.Config.Profiles[1].AccountId) {
+            throw 'Choose a different account.'
+        }
         $matches = @(Get-SessionProfiles $Context)
         if ($matches.Count -and $Context.Config.Profiles[0].Name -notin $matches) {
             throw 'This session belongs to a different local profile. Refresh and confirm the open account before syncing.'
@@ -89,7 +92,7 @@ try {
         Assert-SessionSource $context
         $syncPlan = New-CHPlan -Context $context -Direction AtoB -Scope $request.Scope -ScopeFolder $request.ScopeFolder -ScopeSession $request.ScopeSession
         $answer = [ordered]@{Ok=$true; Action='Plan'; Writes=$syncPlan.Operations.Count;
-            Scope=$syncPlan.Scope;
+            Scope=$syncPlan.Scope; WrapUpsRestored=$syncPlan.WrapUpsRestored;
             Additions=@($syncPlan.Report | Where-Object Action -eq 'Add').Count;
             Updates=@($syncPlan.Report | Where-Object Action -eq 'Update').Count;
             Conflicts=@($syncPlan.Report | Where-Object Action -eq 'Conflict').Count;
@@ -162,7 +165,7 @@ try {
                         Invoke-CHApply -Context $context -Plan $syncPlan -AllowRunning $true -ActiveProfile $sourceId | ForEach-Object { $messageBuffer.Add($_) }
                         $backupLine = @($messageBuffer | Where-Object { $_ -is [string] -and $_.StartsWith('Backup: ') } | Select-Object -First 1)
                         $answer = [ordered]@{Ok=$true; Action='Sync'; Writes=$syncPlan.Operations.Count;
-                            Scope=$syncPlan.Scope;
+                            Scope=$syncPlan.Scope; WrapUpsRestored=$syncPlan.WrapUpsRestored;
                             Additions=@($syncPlan.Report | Where-Object Action -eq 'Add').Count;
                             Updates=@($syncPlan.Report | Where-Object Action -eq 'Update').Count;
                             Conflicts=@($syncPlan.Report | Where-Object Action -eq 'Conflict').Count;

@@ -1,16 +1,21 @@
 import {renderCodexPane,codexDiagnosticsText} from './codex-ui.mjs';
+import {isOtherAccount, profileAccount} from './controller.mjs';
+function accountName(profile, id) {
+  const account = profileAccount(id);
+  return profile?.Email || (profile?.Label && profile.Label.toLowerCase() !== account ? profile.Label : `Account ${account.slice(0, 8)}`);
+}
 export function accountLabel(view, id, empty = 'Choose destination') {
   if (!id) return empty;
   const profile = view.profiles.find(p => p.Id === id);
-  const [account, org] = id.split('\\');
-  const name = profile?.Email || (profile?.Label && profile.Label !== account ? profile.Label : `Account ${account.slice(0, 8)}`);
-  // Organizations can share an email; keep them distinguishable in every picker.
-  return `${name} · ${org?.slice(0, 8) || ''}`;
+  const name = accountName(profile, id);
+  const duplicates = view.profiles.filter(p => p.Id !== id && accountName(p, p.Id).toLowerCase() === name.toLowerCase());
+  if (!duplicates.length) return name;
+  const org = id.split('\\')[1];
+  return duplicates.some(p => p.Id.split('\\')[1] === org) ? `${name} · ${id.slice(0, 8)}` : `${name} · ${org.slice(0, 8)}`;
 }
 
 function mode(view) {
   if (view.error) return 'Error · auto-sync paused';
-  if (view.busy) return 'Working…';
   return view.enabled ? 'Auto · every 30s' : 'Paused';
 }
 
@@ -24,20 +29,20 @@ function time(at, full = false) {
 
 function action(Button, controller, key, label, work, needsPair = false) {
   const v = controller.view;
-  const ready = !needsPair || Boolean(v.source && v.target && v.source !== v.target);
+  const ready = !needsPair || isOtherAccount(v.source, v.target);
   return Button({ key, label, dimColor: v.busy || !ready, onPress: async () => {
     await controller.reopen();
-    if (!v.busy && (!needsPair || (v.source && v.target && v.source !== v.target))) await work();
+    if (!v.busy && (!needsPair || isOtherAccount(v.source, v.target))) await work();
   } });
 }
 
 function automatic(Button, controller) {
   const v = controller.view;
   return Button({ key: 'auto', label: v.enabled ? 'Pause auto-sync' : 'Start auto-sync',
-    dimColor: !v.enabled && (v.busy || !v.source || !v.target || v.source === v.target), onPress: async () => {
+    dimColor: !v.enabled && (v.busy || !isOtherAccount(v.source, v.target)), onPress: async () => {
       await controller.reopen();
       if (v.enabled) await controller.pause();
-      else if (!v.busy && v.source && v.target && v.source !== v.target) await controller.start();
+      else if (!v.busy && isOtherAccount(v.source, v.target)) await controller.start();
     } });
 }
 
@@ -45,13 +50,14 @@ export function launcherVisible(view, site) {
   return view.promptDisplay !== 'hidden' && (view.launcherPlacement === 'all' || view.launcherPlacement === site);
 }
 
-export function renderLauncher({ Box, Button }, controller, openSettings, site) {
+export function renderLauncher({ Box, Text, Button }, controller, openSettings, site) {
   const v = controller.view;
   const location = v.launcherPlacement === 'all' ? ` · ${ {band:'Prompt', mode:'Mode', hint:'Hint'}[site] }` : '';
   const status = v.error ? ' · needs attention' : v.enabled ? ' · Auto' : '';
   return Box({ flexDirection: 'row', flexWrap: 'wrap', gap: 1, children: [
     Button({ key: site === 'band' ? 'settings' : `settings-${site}`, label: `History sync${location}${status}`,
       ...(site === 'band' ? {hotkey: 's'} : {}), onPress: openSettings }),
+    ...(v.busy && v.spinner ? [Text({ dimColor: true, children: v.spinner })] : []),
     ...(v.enabled ? [automatic(Button, controller)] : []),
   ] });
 }
@@ -59,12 +65,12 @@ export function renderLauncher({ Box, Button }, controller, openSettings, site) 
 export function renderBand({ Box, Text, Button }, controller, openSettings) {
   const v = controller.view;
   if (v.promptDisplay === 'hidden') return null;
-  if (v.promptDisplay !== 'compact') return renderLauncher({ Box, Button }, controller, openSettings, 'band');
+  if (v.promptDisplay !== 'compact') return renderLauncher({ Box, Text, Button }, controller, openSettings, 'band');
   const direction = `${accountLabel(v, v.source, 'Confirm this account')} → ${accountLabel(v, v.target)}`;
   const last = samePair(v, v.lastResult) ? ` · Last ${time(v.lastResult.at)}` : '';
   return Box({ flexDirection: 'column', children: [
     Box({ flexDirection: 'row', flexWrap: 'wrap', gap: 1, children: [
-      Text({ bold: true, children: `History sync · ${mode(v)}` }),
+      Text({ bold: true, children: `History sync · ${v.busy ? v.spinner : mode(v)}` }),
       action(Button, controller, 'sync', 'Sync now', () => controller.sync(), true),
       ...(v.enabled ? [automatic(Button, controller)] : []),
       Button({ key: 'settings', label: 'Sync settings', hotkey: 's', onPress: openSettings }),
@@ -82,7 +88,7 @@ export function renderBand({ Box, Text, Button }, controller, openSettings) {
 }
 
 export function profilesText(view) {
-  return view.profiles.map(p => `${accountLabel(view, p.Id)} | ${p.Id} | ${p.Sessions} sessions`).join('\n');
+  return view.profiles.map(p => `${accountName(p, p.Id)} | ${p.Id} | ${p.Sessions} sessions | ${p.EmailSource || (p.Email ? 'Email known' : 'No email label')}`).join('\n');
 }
 
 export function filteredPreviewRows(view) {
@@ -239,21 +245,18 @@ export function renderPane({ Box, Text, Button, Select, Input }, controller, wri
   let content;
   if (section === 'accounts') {
     const sourceChoices = v.profiles.filter(p => !v.sourceCandidates.length || v.sourceCandidates.includes(p.Id));
+    const destinations = v.profiles.filter(p => isOtherAccount(v.source, p.Id));
     content = [
       heading('Accounts'),
-      Text({ children: `From · ${accountLabel(v, v.source, 'Confirm the account open in Claude')}` }),
-      ...(v.source ? [note('This session’s account is the source.')] : [
-        Text({ children: v.status }),
+      ...(v.source ? [Text({ children: `From · ${accountLabel(v, v.source)}` })] : [
         Select({ key: 'source-confirmation', label: 'Account open now', value: '',
           options: [{ value: '', label: 'Choose the open account…' }, ...sourceChoices.map(p => ({ value: p.Id, label: accountLabel(v, p.Id) }))],
-          onSelect: async value => { await controller.reopen(); if (!v.busy && value) await controller.choose(value, v.target === value ? '' : v.target); } }),
+          onSelect: async value => { await controller.reopen(); if (!v.busy && value) await controller.choose(value, isOtherAccount(value, v.target) ? v.target : ''); } }),
       ]),
-      Select({ key: 'target', label: 'To · inactive account', value: v.target,
-        options: [{ value: '', label: 'Choose destination…' }, ...v.profiles.filter(p => p.Id !== v.source).map(p => ({
-          value: p.Id, label: `${accountLabel(v, p.Id)} · ${p.Sessions} sessions`,
-        }))],
-        onSelect: async value => { await controller.reopen(); if (!v.busy) await controller.choose(v.source, value); } }),
-      note('Copy saved Code history from this account into the destination. Keep the destination account inactive.'),
+      ...(destinations.length ? [Select({ key: 'target', label: 'To', value: v.target,
+        options: [{ value: '', label: 'Choose destination…' }, ...destinations.map(p => ({ value: p.Id, label: accountLabel(v, p.Id) }))],
+        onSelect: async value => { await controller.reopen(); if (!v.busy && v.source && (!value || isOtherAccount(v.source, value))) await controller.choose(v.source, value); } }),
+        note('Keep the receiving account inactive.')] : v.source ? [note('No other account found.')] : []),
       copy('copy-profiles', 'Copy profile list', () => profilesText(v)),
       row([action(Button, controller, 'refresh', 'Refresh accounts', () => controller.refresh()),
         action(Button, controller, 'continue', 'Continue to Sync', () => go('sync'), true)]),
@@ -284,7 +287,7 @@ export function renderPane({ Box, Text, Button, Select, Input }, controller, wri
       row([automatic(Button, controller)]),
       note('The source account can stay open. Keep the destination inactive. Changing the destination or scope pauses automatic sync.'),
       heading('Results'),
-      Text({ children: v.status }),
+      ...(!v.busy ? [Text({ children: v.status })] : []),
       ...(samePair(v, v.lastResult) ? [Text({ children: `${v.lastResult.message}\nLast sync: ${time(v.lastResult.at, true)}` })] : [note('No completed sync for this direction yet.')]),
       ...(v.preview ? [Text({ children: v.preview.message }),
         copy('copy-preview', 'Copy preview', () => previewText(v)),
@@ -314,6 +317,7 @@ export function renderPane({ Box, Text, Button, Select, Input }, controller, wri
     row(['accounts', 'sync', 'backups', 'codex'].map((key, i) => Button({ key: `nav-${key}`,
       label: `${section === key ? '› ' : ''}${['Accounts', 'Sync', 'Backups', 'Codex import'][i]}`, hotkey: ['a', 's', 'b', 'c'][i],
       dimColor: section !== key, onPress: () => go(key) }))),
+    ...(v.busy ? [Text({ dimColor: true, children: `${v.spinner} ${v.status}` })] : []),
     ...content,
     ...(v.error && section !== 'codex' ? [Text({ color: 'red', children: v.error })] : []),
     ...(v.notice ? [note(v.notice)] : []),

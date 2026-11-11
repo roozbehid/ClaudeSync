@@ -63,6 +63,14 @@ Check ($result.RowsTotal -eq 2 -and -not $result.RowsTruncated) 'Bridge exposes 
 $changed=@($result.Rows | Where-Object Action -eq 'Update')[0]
 Check ($changed.Title -eq 'Source title' -and $changed.Before.Title -eq 'Target title' -and $changed.After.Title -eq 'Source title' -and $changed.After.Archived) 'Bridge comparison preserves before title and shows planned archiving'
 Check (-not [IO.Directory]::Exists((Join-Path $testDirectory 'state')) -and -not [IO.Directory]::Exists((Join-Path $testDirectory 'mod-control'))) 'Configured discovery and preview do not create sync state or lease'
+$sameAccountId = ($sourceId -split '\\')[0] + '\' + ($targetId -split '\\')[1]
+$sameAccountPath = Join-Path $sessions $sameAccountId
+[IO.Directory]::CreateDirectory($sameAccountPath) | Out-Null
+foreach ($action in @('Plan', 'Arm', 'Sync')) {
+    $result = Call-Bridge $action -Target $sameAccountId
+    Check (-not $result.Ok -and $result.Error -eq 'Choose a different account.') "$action rejects a different organization under the same account"
+}
+Check (@(Get-ChildItem -LiteralPath $sameAccountPath -Force).Count -eq 0) 'Rejected same-account sync writes no history'
 $pendingId='cccccccc-cccc-4ccc-8ccc-cccccccccccc'
 $pendingPath=Add-FixtureCard $sourceId $pendingId 'Not started' $true
 $pendingCard=Get-Content -LiteralPath $pendingPath -Raw | ConvertFrom-Json

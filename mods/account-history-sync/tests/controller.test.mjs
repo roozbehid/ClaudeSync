@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createController } from '../hooks/controller.mjs';
 import { register } from '../hooks/register.mjs';
-import { renderBand, renderPane, previewText, filteredPreviewRows } from '../hooks/ui.mjs';
+import { renderBand, renderPane, previewText, profilesText, filteredPreviewRows } from '../hooks/ui.mjs';
 
 test('reopening on the Codex tab reloads its account catalog without importing',async()=>{
  const {c,api,calls}=await ready({respond:async(action,argv)=>argv.some(a=>a.includes('ClaudeCodex-Bridge.ps1'))?{exitCode:0,stdout:JSON.stringify({Ok:true,Action:action,ResultPath:'C:/Private/profiles.json',ResultBytes:200})}:null});
@@ -22,8 +22,8 @@ const control = (tree, key) => flatten(tree).find(e => e.props.key === key).prop
 const textContent = tree => flatten(tree).filter(e => e.type === 'Text').map(e => e.props.children).join('\n');
 
 function harness(options = {}) {
-  const calls = [], timers = [], logs = [], saved = new Map(Object.entries(options.saved || {}));
-  const timer = (ms, fn) => { const t = { ms, fn, cancelled: false, cancel() { this.cancelled = true; } }; timers.push(t); return t; };
+  const calls = [], timers = [], animationTimers = [], logs = [], saved = new Map(Object.entries(options.saved || {}));
+  const timer = (ms, fn) => { const t = { ms, fn, cancelled: false, cancel() { this.cancelled = true; } }; (ms < 500 ? animationTimers : timers).push(t); return t; };
   const api = {
     root: 'C:/Mods/History Sync', windows: true,
     redraw() {}, log: text => logs.push(text), now: async () => 1000,
@@ -41,7 +41,7 @@ function harness(options = {}) {
         Profiles: profiles.map(p => ({ ...p })), CurrentProfile: A, SessionProfiles: [A], Additions: 1, Updates: 0, Conflicts: 0, Skipped: 0, Report: [], Backup: action === 'Sync' ? 'C:/Backups/receipt' : '' }) };
     },
   };
-  return { api, calls, timers, logs, saved };
+  return { api, calls, timers, animationTimers, logs, saved };
 }
 async function ready(options) {
   const h = harness(options), c = createController();
@@ -61,10 +61,48 @@ test('startup discovers this account, restores only destination, and never write
   await h.timers[0].fn();
   assert.equal(h.calls.length, 2);
 });
+test('replaces a saved destination in the same account and keeps the picker short', async () => {
+  const sameAccount = A.split('\\')[0] + '\\' + B.split('\\')[1];
+  const thirdAccount = '55555555-5555-4555-8555-555555555555\\' + B.split('\\')[1];
+  let available = [...profiles, { Id: sameAccount, Label: A.split('\\')[0], Sessions: 3 }];
+  const h = harness({ saved: {destination: sameAccount}, respond: async action => action === 'Profiles' ? {
+    exitCode: 0, stdout: JSON.stringify({ Ok: true, Profiles: available, CurrentProfile: A, SessionProfiles: [A] }), stderr: '',
+  } : null });
+  const c = createController(); await c.initialize(h.api);
+  assert.equal(c.view.target, B);
+  const pane = renderPane(elements, c), options = control(pane, 'target').options;
+  assert.match(textContent(pane), /From · a@example.test/);
+  assert.deepEqual(options.slice(1), [{value: B, label: 'b@example.test'}]);
+  await assert.rejects(c.choose(A, sameAccount), /Choose a different account/);
+  await control(pane, 'target').onSelect(sameAccount);
+  assert.equal(c.view.target, B);
+  assert.match(profilesText(c.view), /Account 11111111 .*3 sessions.*No email label/);
+  assert.ok(!h.calls.some(r => ['Arm', 'Sync'].includes(r.action)));
+  available = [...available, { Id: thirdAccount, Sessions: 1 }];
+  const ambiguous = createController(); await ambiguous.initialize(h.api);
+  assert.equal(ambiguous.view.target, '');
+});
 test('preview cannot launch a sync', async () => {
   const { c, calls } = await ready();
   await c.preview();
   assert.deepEqual(calls.map(r => r.action), ['Plan']);
+});
+
+test('the activity spinner advances during preview and stops when it finishes', async () => {
+  let finish;
+  const loading = new Promise(resolve => { finish = resolve; });
+  const { c, calls, animationTimers } = await ready({ respond: async action => action === 'Plan' ? loading : null });
+  await c.showSection('sync');
+  const open = control(renderPane(elements, c), 'preview').onPress();
+  while (!calls.some(call => call.action === 'Plan')) await Promise.resolve();
+  const timer = animationTimers.at(-1), first = c.view.spinner;
+  assert.match(textContent(renderPane(elements, c)), /Building a read-only preview/);
+  await timer.fn(); assert.notEqual(c.view.spinner, first);
+  assert.ok(textContent(renderBand(elements, c, () => {})).includes(c.view.spinner));
+  finish({ exitCode: 0, stdout: JSON.stringify({ Ok: true, Action: 'Plan' }) });
+  await open;
+  assert.equal(c.view.spinner, ''); assert.ok(timer.cancelled);
+  assert.deepEqual(calls.map(call => call.action), ['Plan']);
 });
 
 test('scope choices load on demand through a file without previewing or copying', async () => {
@@ -284,9 +322,10 @@ test('destination selection cannot reverse this account into a write target', as
   assert.equal(c.view.enabled, false); assert.equal(calls.at(-1).action, 'Release');
 });
 test('same-profile pair cannot write or arm', async () => {
-  const { c, calls } = await ready(); await c.choose(A, A); calls.length = 0;
-  await c.start();
-  assert.match(c.view.error, /must be different/);
+  const { c, calls } = await ready();
+  await assert.rejects(c.choose(A, A), /Choose a different account/);
+  await control(renderPane(elements, c), 'target').onSelect(A);
+  assert.equal(c.view.target, B);
   assert.ok(!calls.some(r => ['Arm', 'Sync'].includes(r.action)));
 });
 test('helper errors pause automatic syncing and retain the backup receipt', async () => {
@@ -428,7 +467,7 @@ test('changed session profile pauses automation and cannot become its own destin
     exitCode: 0, stdout: JSON.stringify({ Ok: true, Profiles: profiles, CurrentProfile: B, SessionProfiles: [B] }), stderr: '',
   } : null });
   await c.start(); changed = true; await c.refresh();
-  assert.equal(c.view.enabled, false); assert.equal(c.view.source, B); assert.equal(c.view.target, '');
+  assert.equal(c.view.enabled, false); assert.equal(c.view.source, B); assert.equal(c.view.target, A);
   assert.equal(calls.at(-1).action, 'Release');
 });
 

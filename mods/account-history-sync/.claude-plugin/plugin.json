@@ -1,6 +1,6 @@
 {
   "name": "account-history-sync",
-  "version": "0.6.0",
+  "version": "0.6.9",
   "description": "Sync local Claude Code history between accounts or import selected conversations into Codex.",
   "author": { "name": "ClaudeSync" }
 }

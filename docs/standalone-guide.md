@@ -195,6 +195,26 @@ environment references remain attached; both logins still need access to the sam
 distribution/host and its existing transcript store. The tool does not install
 WSL, add SSH hosts, copy SSH credentials, or verify remote transcript existence.
 
+One-way sync also copies pending local background-task suggestions on eligible
+sessions, including cards that already match. It keeps the original expiration
+time and does not start a task. Expired suggestions, interactive offers, cloud
+task links, and suggestions already resolved on either profile are not copied.
+The receiving profile keeps its own suggestions and decisions. These suggestions
+can contain prompt text, so keep sync backups private.
+
+One-way sync can also copy saved notes from linked sessions when the matching
+child card exists in the destination or is included in the same sync. It copies
+recorded notes for display, never queued messages. For a new card or a newer
+assistant turn, sync carries the saved wrap-up when available. One-way sync also
+repairs existing cards with a missing saved wrap-up for the same current turn,
+across every session in the selected scope. It can restore the two native
+turn-card settings and repair the saved turn-box availability on resume for a
+matching session even without a saved wrap-up. Desktop
+uses the shared transcript to decide which question, if any, is still current.
+Explicit destination settings stay in place. For a restored saved wrap-up, the
+repair records delivery so a later dismissal stays dismissed. The first repair
+of a legacy copy has no delivery receipt to check for a previous dismissal.
+
 Scheduled history is optional:
 
 ```powershell

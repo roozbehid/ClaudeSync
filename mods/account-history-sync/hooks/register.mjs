@@ -2,7 +2,7 @@ import { createController } from './controller.mjs';
 import { renderBand, renderPane, renderLauncher, launcherVisible } from './ui.mjs';
 
 const PANE = 'history-sync';
-const HELP = 'Open History sync above the prompt or use /history-sync. Use /history-sync codex for Claude → Codex imports. Optional commands: accounts, backups, profiles, to <inactive-destination-email-or-id>, preview, sync, start, pause, status. Pause before switching accounts.';
+const HELP = 'Open History sync above the prompt or use /history-sync. Use /history-sync codex for Claude → Codex imports. Other commands: accounts, backups, profiles, to <inactive-destination-email-or-id>, preview, sync, start, pause, status.';
 
 export function register(on) {
   const controller = createController();
@@ -96,9 +96,9 @@ export function register(on) {
   on('ui.render', { component: 'SessionMode' }, async ($, e, next) => {
     const existing = await next(e);
     if (!launcherVisible(controller.view, 'mode')) return existing;
-    const { Box, Button } = $.ui.resolve(e);
+    const { Box, Text, Button } = $.ui.resolve(e);
     return Box({ flexDirection: 'row', flexWrap: 'wrap', gap: 1, children: [existing,
-      renderLauncher({ Box, Button }, controller, async () => {
+      renderLauncher({ Box, Text, Button }, controller, async () => {
         await controller.reopen();
         if (!controller.view.source || !controller.view.target) controller.showSection('accounts');
         await $.ui.open({ id: PANE, title: 'History sync', focus: true, closeOnEscape: true });
@@ -109,9 +109,9 @@ export function register(on) {
   on('ui.render', { component: 'PromptHint' }, async ($, e, next) => {
     const existing = await next(e);
     if (!launcherVisible(controller.view, 'hint')) return existing;
-    const { Box, Button } = $.ui.resolve(e);
+    const { Box, Text, Button } = $.ui.resolve(e);
     return Box({ flexDirection: 'row', flexWrap: 'wrap', gap: 1, children: [existing,
-      renderLauncher({ Box, Button }, controller, async () => {
+      renderLauncher({ Box, Text, Button }, controller, async () => {
         await controller.reopen();
         if (!controller.view.source || !controller.view.target) controller.showSection('accounts');
         await $.ui.open({ id: PANE, title: 'History sync', focus: true, closeOnEscape: true });

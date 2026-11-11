@@ -20,7 +20,7 @@ const noopTimer = () => ({cancel(){}});
 const adapter = {
   root:'Fixture only', windows:true, sessionId:async()=> 'preview', envGet:async()=> '',
   now:async()=>Date.now(), storeGet:async key=>saved.get(key), storeSet:async(key,value)=>saved.set(key,value),
-  redraw:()=>queueMicrotask(draw), log:()=>{}, every:noopTimer, after:noopTimer,
+  redraw:()=>queueMicrotask(draw), log:()=>{}, every:(ms,fn)=>{if(ms>500)return noopTimer();const id=setInterval(fn,ms);return{cancel:()=>clearInterval(id)};}, after:noopTimer,
   readText:async path=>codexFiles.get(path),
   processRun:async argv=> {
     const action = argv[argv.indexOf('-Action')+1];
@@ -149,6 +149,6 @@ button,select{font:inherit;border:1px solid #d6d3ca;background:#fcfbf8;border-ra
 <div class="tools"><button id="reload">Simulate session reload</button><button id="remove-dom">Remove DOM launchers</button><label><input id="failure" type="checkbox">Simulate copy failure</label><label><input id="ambiguous" type="checkbox">Session found in both accounts</label></div>
 <p class="muted">Simulated helper operations: <code id="operations"></code></p><p id="preview-error" class="error"></p>
 <textarea id="copy-output" hidden readonly aria-label="Selectable copy text" style="width:100%;height:160px"></textarea>
-<script type="module">${codexController.replaceAll('export ', '')}\n${codexUi.replaceAll('export ', '')}\n${controller.replace(/^import .*codex-controller.*\r?\n/m,'').replaceAll('export ', '')}\n${ui.replace(/^import .*codex-ui.*\r?\n/m,'').replaceAll('export ', '')}\n${runtime}\n${domLaunchers}</script></html>`;
+<script type="module">${codexController.replaceAll('export ', '')}\n${codexUi.replaceAll('export ', '')}\n${controller.replace(/^import .*codex-controller.*\r?\n/m,'').replaceAll('export ', '')}\n${ui.replace(/^import .*\r?\n/gm,'').replaceAll('export ', '')}\n${runtime}\n${domLaunchers}</script></html>`;
 await writeFile(new URL('docs/history-sync-preview.html', root), html);
 console.log('Built docs/history-sync-preview.html with fixture-only operations.');
