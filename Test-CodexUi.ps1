@@ -8,7 +8,7 @@ $savedEnv=@{USERPROFILE=$env:USERPROFILE;APPDATA=$env:APPDATA;LOCALAPPDATA=$env:
 $script:Count=0
 function Check($ok,$message){$script:Count++;if(-not $ok){throw "FAILED: $message"}}
 try {
-    $env:USERPROFILE=Join-Path $fixture 'Windows User'
+    $env:USERPROFILE=Join-Path $fixture ('Windows User '+[char]0x5B57)
     $env:LOCALAPPDATA=Join-Path $env:USERPROFILE 'AppData\Local'
     $env:APPDATA=Join-Path $env:USERPROFILE 'AppData\Roaming'
     $env:CODEX_HOME=Join-Path $fixture 'Codex home'
@@ -42,6 +42,20 @@ try {
     }
     $profiles=Call-Ui @{Action='Profiles'}
     Check ($profiles.Data.profiles.Count -eq 2) 'Profiles discovers accounts without requiring an account pair'
+    $childInfo=[Diagnostics.ProcessStartInfo]::new()
+    $childInfo.FileName=Join-Path $PSHOME 'powershell.exe'
+    $childInfo.Arguments='-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -Action Profiles -ConfigPath "{1}"' -f $bridge,$config
+    $childInfo.UseShellExecute=$false
+    $childInfo.RedirectStandardOutput=$true
+    $childInfo.StandardOutputEncoding=[Text.UTF8Encoding]::new($false)
+    $bridgeProcess=[Diagnostics.Process]::Start($childInfo)
+    try{
+        $childEnvelope=$bridgeProcess.StandardOutput.ReadToEnd()|ConvertFrom-Json
+        $bridgeProcess.WaitForExit()
+        Check ($bridgeProcess.ExitCode -eq 0 -and $childEnvelope.Ok -and
+            $childEnvelope.ResultPath.StartsWith($env:LOCALAPPDATA,[StringComparison]::Ordinal) -and
+            [IO.File]::Exists($childEnvelope.ResultPath)) 'Child-process result paths round-trip through UTF-8 for non-ASCII Windows profiles'
+    }finally{$bridgeProcess.Dispose()}
     $choices=Call-Ui @{Action='Choices';SourceProfile=$source}
     Check ($choices.Data.sessions.Count -eq 2) 'Choices belongs to the explicitly selected source'
     $argsBase=@{SourceProfile=$source;Scope='Session';ScopeSession=$parent;DestinationFolder=$folder}

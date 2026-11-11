@@ -30,6 +30,37 @@ async function fixture(t) {
   return {root, request, record, messages, transcript, async saveMessages(rows = messages) { await fs.writeFile(transcript, rows.map(JSON.stringify).join('\n') + '\n'); }};
 }
 
+test('parallel tool records are recovered from the active response without importing abandoned text', async t => {
+  const f = await fixture(t);
+  const [prompt, closing] = f.messages;
+  const toolCall = (id, messageId) => ({...closing, uuid: randomUUID(), parentUuid: prompt.uuid,
+    message: {role: 'assistant', id: messageId, content: [{type: 'tool_use', id, name: 'Read', input: {}}]}});
+  const toolResult = (call, id, text) => ({...prompt, uuid: randomUUID(), parentUuid: call.uuid,
+    message: {role: 'user', content: [{type: 'tool_result', tool_use_id: id, content: text}]}});
+  const first = toolCall('tool_first', 'message_parallel');
+  const second = toolCall('tool_second', 'message_parallel');
+  const abandoned = toolCall('tool_abandoned', 'message_abandoned');
+  const firstResult = toolResult(first, 'tool_first', 'First synthetic result');
+  firstResult.message.content.push({type: 'text', text: 'Unrelated text on a sibling record'});
+  const secondResult = toolResult(second, 'tool_second', 'Second synthetic result');
+  closing.parentUuid = secondResult.uuid;
+  const records = [prompt, abandoned, first, second, firstResult, secondResult, closing];
+  await f.saveMessages(records);
+  const stitched = await stitchTranscripts(f.record.transcripts, f.request.source.projectsRoot);
+  assert.deepEqual(stitched.messages.map(message => message.uuid),
+    [prompt.uuid, first.uuid, second.uuid, firstResult.uuid, secondResult.uuid, closing.uuid]);
+  assert.equal(stitched.stats.toolCalls, 2);
+  assert.equal(stitched.stats.toolResults, 2);
+  assert.equal(stitched.unresolvedParallelTools, 0);
+  assert.doesNotMatch(JSON.stringify(stitched.messages), /Unrelated text/);
+
+  records.splice(-1, 0, toolResult(first, 'tool_first', 'Ambiguous duplicate'));
+  await f.saveMessages(records);
+  const plan = await createImportPlan(f.request);
+  assert.equal(plan.rows[0].stats.toolResults, 1);
+  assert.match(plan.rows[0].warnings.join(' '), /parallel tool records could not be matched/);
+});
+
 function mockServer(f, options = {}) {
   const calls = [], target = randomUUID();
   let sessions;

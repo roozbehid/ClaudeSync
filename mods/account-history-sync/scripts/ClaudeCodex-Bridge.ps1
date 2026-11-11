@@ -10,7 +10,9 @@ param(
 )
 $ErrorActionPreference='Stop'
 $uiRequest=@{Action=$Action;Config=$ConfigPath;Source=$SourceProfile;Scope=$Scope;Folder=$ScopeFolder;Session=$ScopeSession;DestinationFolder=$DestinationFolder;CodexHome=$CodexHome;NodeExecutable=$NodeExecutable;CodexExecutable=$CodexExecutable;Plan=$PlanPath;NewRevision=[bool]$NewRevision}
+$previousOutputEncoding=[Console]::OutputEncoding
 try {
+    [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false)
     . (Join-Path $PSScriptRoot 'Sync-ClaudeHistory.ps1')
     $dataRoot=Join-Path $env:LOCALAPPDATA 'ClaudeHistorySync'
     [void](Assert-CHPath $dataRoot $dataRoot)
@@ -103,3 +105,4 @@ try {
     Write-CHAtomic $file $bytes
     @{Ok=$true;Action=$uiRequest.Action;ResultPath=$file;ResultBytes=$bytes.Length}|ConvertTo-Json -Compress
 }catch{@{Ok=$false;Error=$_.Exception.Message}|ConvertTo-Json -Compress;exit 1}
+finally{[Console]::OutputEncoding=$previousOutputEncoding}

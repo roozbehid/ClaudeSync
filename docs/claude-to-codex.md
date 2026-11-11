@@ -67,7 +67,8 @@ after a reload. Neither action automatically imports. The engine rechecks source
 hashes and reconciles native history before resubmitting. The pane's helper call
 has a ten-minute budget: if an unusually large import exceeds it, retain the saved
 preview and allow the original process to finish before retrying. An active import
-lock prevents a second import from running concurrently.
+lock prevents a second import from running concurrently. If the original process
+has stopped and retry reports a leftover lock, follow the recovery steps below.
 Temporary files used to display UI results expire after 24 hours. Saved import
 plans, transcript snapshots and receipts are retained for recovery.
 

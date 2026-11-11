@@ -4,7 +4,9 @@ import path from 'node:path';
 import {CodexAppServer} from './codex-app-server.mjs';
 
 const VERSION = 1;
-const STITCHER_VERSION = 5;
+const STITCHER_VERSION = 6;
+// Keep existing revision IDs when a fresh preview yields identical messages.
+const REVISION_FORMAT = 5;
 export const hash = value => createHash('sha256').update(value).digest('hex');
 const revisionKey = row => `${row.sourceKey}/${row.revision}`;
 const canonical = value => path.resolve(value.replace(/^\\\\\?\\/, '')).toLowerCase();
@@ -206,6 +208,61 @@ function persistedCompactionTail(boundary, nodes, positions, ambiguous) {
   return segment.tailUuid;
 }
 
+function restoreParallelToolRecords(ordered, nodes, positions, included, ambiguous) {
+  const eligible = record => !record.isMeta && !record.isSidechain && !record.isCompactSummary && !record.parent_tool_use_id &&
+    typeof record.sessionId === 'string' && Array.isArray(record.message?.content);
+  const responseKey = record => JSON.stringify([record.sessionId, record.message.id]);
+  const toolKey = (record, id) => JSON.stringify([record.sessionId, id]);
+  const activeResponses = new Set(), calls = new Map(), seenResults = new Set(), added = [];
+  for (const record of ordered.filter(eligible)) {
+    if (record.type === 'assistant' && typeof record.message.id === 'string') activeResponses.add(responseKey(record));
+    for (const block of record.message.content) {
+      if (record.type === 'assistant' && block?.type === 'tool_use' && typeof block.id === 'string') calls.set(toolKey(record, block.id), record);
+      if (record.type === 'user' && block?.type === 'tool_result' && typeof block.tool_use_id === 'string') seenResults.add(toolKey(record, block.tool_use_id));
+    }
+  }
+  const offChain = [...nodes.values()].filter(record => !included.has(record.uuid) && eligible(record));
+  const siblingCalls = new Map(), callOccurrences = new Map();
+  for (const record of offChain) {
+    if (record.type !== 'assistant' || !activeResponses.has(responseKey(record))) continue;
+    const keys = record.message.content.filter(block => block?.type === 'tool_use' && typeof block.id === 'string').map(block => toolKey(record, block.id));
+    if (!keys.length) continue;
+    siblingCalls.set(record, keys);
+    for (const key of keys) callOccurrences.set(key, (callOccurrences.get(key) ?? 0) + 1);
+  }
+  let unresolved = 0;
+  for (const [record, keys] of siblingCalls) {
+    if (ambiguous.has(record.uuid) || keys.some(key => calls.has(key) || callOccurrences.get(key) !== 1)) { unresolved++; continue; }
+    for (const key of keys) calls.set(key, record);
+    added.push(record);
+  }
+  const results = new Map(), occurrences = new Map();
+  for (const record of offChain) {
+    if (record.type !== 'user') continue;
+    const blocks = record.message.content.filter(block => {
+      if (block?.type !== 'tool_result' || typeof block.tool_use_id !== 'string') return false;
+      const key = toolKey(record, block.tool_use_id), call = calls.get(key);
+      if (!call || seenResults.has(key) || positions.get(call.uuid) >= positions.get(record.uuid)) return false;
+      occurrences.set(key, (occurrences.get(key) ?? 0) + 1);
+      return true;
+    });
+    if (blocks.length) results.set(record, blocks);
+  }
+  for (const [record, blocks] of results) {
+    const verified = ambiguous.has(record.uuid) ? [] :
+      blocks.filter(block => occurrences.get(toolKey(record, block.tool_use_id)) === 1);
+    unresolved += blocks.length - verified.length;
+    if (verified.length) added.push({...record, message: {...record.message, content: verified}});
+  }
+  if (!added.length) return {ordered, unresolved};
+  const position = record => positions.get(record.uuid);
+  if (ordered.some((record, index) => index > 0 && position(ordered[index - 1]) >= position(record))) {
+    return {ordered, unresolved: unresolved + added.length};
+  }
+  const combined = [...ordered, ...added].sort((left, right) => position(left) - position(right));
+  return {ordered: combined, unresolved};
+}
+
 export async function stitchTranscripts(transcripts, projectsRoot) {
   const nodes = new Map(), ordered = [], included = new Set(), sources = [];
   const positions = new Map(), ambiguous = new Set(), recoveries = new Map();
@@ -283,7 +340,8 @@ export async function stitchTranscripts(transcripts, projectsRoot) {
     serverToolCalls: 0, advisorResults: 0, advisorErrors: 0, omittedEncryptedAdvisorResults: 0, toolReferences: 0, toolDefinitionChanges: 0, images: 0, documents: 0};
   const attachments = new Map();
   const messages = [];
-  for (const record of ordered) {
+  const parallel = restoreParallelToolRecords(ordered, nodes, positions, included, ambiguous);
+  for (const record of parallel.ordered) {
     if (!['user', 'assistant'].includes(record.type) || record.isMeta || record.isCompactSummary) continue;
     const content = portableContent(record.message.content, stats, attachments);
     if (!content.length) continue;
@@ -295,7 +353,8 @@ export async function stitchTranscripts(transcripts, projectsRoot) {
     stats.messages++; stats[type === 'user' ? 'userMessages' : 'assistantMessages']++;
   }
   if (!stats.userMessages) throw new Error('No portable user messages were found.');
-  return {messages, stats, sources, attachments: [...attachments.values()], compactionRecoveries: [...recoveries.values()].filter(recovery => included.has(recovery.boundaryUuid))};
+  return {messages, stats, sources, attachments: [...attachments.values()], unresolvedParallelTools: parallel.unresolved,
+    compactionRecoveries: [...recoveries.values()].filter(recovery => included.has(recovery.boundaryUuid))};
 }
 
 function linkAttachments(content, assets) {
@@ -343,6 +402,7 @@ export async function createImportPlan(request) {
         row.compactionRecoveries = stitched.compactionRecoveries;
         row.warnings.push(`${stitched.compactionRecoveries.length} compaction links were reconnected using verified persisted-message metadata; memory-only record IDs are not transcript messages.`);
       }
+      if (stitched.unresolvedParallelTools) row.warnings.push('Some parallel tool records could not be matched unambiguously to the imported history.');
       if (row.stats.images) row.warnings.push(`${row.stats.images} images will be preserved as linked local attachments; native inline image display is not recreated.`);
       if (row.stats.documents) row.warnings.push(`${row.stats.documents} PDF documents will be preserved as linked local attachments; document contents are not embedded as native Codex attachments.`);
       if (row.stats.omittedEncryptedAdvisorResults) row.warnings.push(`${row.stats.omittedEncryptedAdvisorResults} encrypted advisor responses have no readable source text; placeholders are retained.`);
@@ -355,7 +415,7 @@ export async function createImportPlan(request) {
         const asset = {path: await fs.realpath(file), hash: attachment.hash, mediaType: attachment.mediaType, bytes: attachment.bytes.length};
         assets.set(attachment.hash, asset); row.assets.push(asset);
       }
-      row.revision = hash(JSON.stringify({stitcher: STITCHER_VERSION, messages: stitched.messages, title: record.title, cwd: canonical(row.cwd), parent: record.parent, archived: record.archived}));
+      row.revision = hash(JSON.stringify({stitcher: REVISION_FORMAT, messages: stitched.messages, title: record.title, cwd: canonical(row.cwd), parent: record.parent, archived: record.archived}));
       const existing = ledger.entries[revisionKey(row)];
       if (existing?.phase === 'complete') { row.status = 'Unchanged'; row.target = existing.target; row.reason = existing.notice || 'This revision was already imported.'; continue; }
       if (existing && !existing.target && request.newRevision) row.replacesAttempt = existing.snapshotPath;
