@@ -1,7 +1,9 @@
 import {renderCodexPane,codexDiagnosticsText} from './codex-ui.mjs';
-import {isOtherAccount, profileAccount} from './controller.mjs';
+import {destinationProfiles, isOtherAccount, profileAccount} from './controller.mjs';
 function accountName(profile, id) {
   const account = profileAccount(id);
+  if (profile?.Alias) return profile.Alias;
+  if (profile?.OrganizationName) return [profile.OrganizationName, profile.Email].filter(Boolean).join(' · ');
   return profile?.Email || (profile?.Label && profile.Label.toLowerCase() !== account ? profile.Label : `Account ${account.slice(0, 8)}`);
 }
 export function accountLabel(view, id, empty = 'Choose destination') {
@@ -10,8 +12,8 @@ export function accountLabel(view, id, empty = 'Choose destination') {
   const name = accountName(profile, id);
   const duplicates = view.profiles.filter(p => p.Id !== id && accountName(p, p.Id).toLowerCase() === name.toLowerCase());
   if (!duplicates.length) return name;
-  const org = id.split('\\')[1];
-  return duplicates.some(p => p.Id.split('\\')[1] === org) ? `${name} · ${id.slice(0, 8)}` : `${name} · ${org.slice(0, 8)}`;
+  const [account, org] = id.split('\\');
+  return duplicates.some(p => p.Id.split('\\')[1] === org) ? `${name} · ${account.slice(0, 8)} / ${org.slice(0, 8)}` : `${name} · ${org.slice(0, 8)}`;
 }
 
 function mode(view) {
@@ -88,7 +90,7 @@ export function renderBand({ Box, Text, Button }, controller, openSettings) {
 }
 
 export function profilesText(view) {
-  return view.profiles.map(p => `${accountName(p, p.Id)} | ${p.Id} | ${p.Sessions} sessions | ${p.EmailSource || (p.Email ? 'Email known' : 'No email label')}`).join('\n');
+  return view.profiles.map(p => `${accountName(p, p.Id)} | ${p.Id} | ${p.Sessions} sessions | ${p.EmailSource || (p.Email ? 'Email known' : 'No email label')} | ${p.Verified ? 'Verified' : 'Unverified'}`).join('\n');
 }
 
 export function filteredPreviewRows(view) {
@@ -245,7 +247,8 @@ export function renderPane({ Box, Text, Button, Select, Input }, controller, wri
   let content;
   if (section === 'accounts') {
     const sourceChoices = v.profiles.filter(p => !v.sourceCandidates.length || v.sourceCandidates.includes(p.Id));
-    const destinations = v.profiles.filter(p => isOtherAccount(v.source, p.Id));
+    const destinations = v.source ? destinationProfiles(v) : [];
+    const hasUnverified = v.profiles.some(p => isOtherAccount(v.source, p.Id) && !p.Verified);
     content = [
       heading('Accounts'),
       ...(v.source ? [Text({ children: `From · ${accountLabel(v, v.source)}` })] : [
@@ -254,9 +257,10 @@ export function renderPane({ Box, Text, Button, Select, Input }, controller, wri
           onSelect: async value => { await controller.reopen(); if (!v.busy && value) await controller.choose(value, isOtherAccount(value, v.target) ? v.target : ''); } }),
       ]),
       ...(destinations.length ? [Select({ key: 'target', label: 'To', value: v.target,
-        options: [{ value: '', label: 'Choose destination…' }, ...destinations.map(p => ({ value: p.Id, label: accountLabel(v, p.Id) }))],
+        options: [{ value: '', label: 'Choose destination…' }, ...destinations.map(p => ({ value: p.Id, label: `${accountLabel(v, p.Id)}${p.Verified ? '' : ' · Unverified'}` }))],
         onSelect: async value => { await controller.reopen(); if (!v.busy && v.source && (!value || isOtherAccount(v.source, value))) await controller.choose(v.source, value); } }),
-        note('Keep the receiving account inactive.')] : v.source ? [note('No other account found.')] : []),
+        note('Keep the receiving account inactive.')] : v.source ? [note('No verified destination found. Open History sync in a Code session on the receiving account, then return here and refresh.')] : []),
+      ...(hasUnverified ? [action(Button, controller, 'toggle-unverified', v.showUnverified ? 'Hide unverified destinations' : 'Show unverified destinations', () => controller.toggleUnverified())] : []),
       copy('copy-profiles', 'Copy profile list', () => profilesText(v)),
       row([action(Button, controller, 'refresh', 'Refresh accounts', () => controller.refresh()),
         action(Button, controller, 'continue', 'Continue to Sync', () => go('sync'), true)]),

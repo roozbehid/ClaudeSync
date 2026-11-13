@@ -1,5 +1,5 @@
 import { createController } from './controller.mjs';
-import { renderBand, renderPane, renderLauncher, launcherVisible } from './ui.mjs';
+import { renderBand, renderPane, renderLauncher, launcherVisible, profilesText } from './ui.mjs';
 
 const PANE = 'history-sync';
 const HELP = 'Open History sync above the prompt or use /history-sync. Use /history-sync codex for Claude → Codex imports. Other commands: accounts, backups, profiles, to <inactive-destination-email-or-id>, preview, sync, start, pause, status.';
@@ -53,18 +53,20 @@ export function register(on) {
           return {};
         case 'profiles': {
           await controller.refresh();
-          return { text: controller.view.profiles.map(p => `${p.Email || p.Label} | ${p.Id} | ${p.Sessions} sessions`).join('\n') || controller.statusText() };
+          return { text: profilesText(controller.view) || controller.statusText() };
         }
         case 'to':
           if (args.length !== 2) return { text: HELP };
           await controller.refresh();
-          await controller.choose(controller.view.source, controller.resolveSelector(args[1]));
+          await controller.choose(controller.view.source, controller.resolveSelector(args[1], controller.view.source));
           return { text: controller.statusText() };
-        case 'pair': // Compatibility: cannot replace an already identified current source.
+        case 'pair': { // Compatibility: cannot replace an already identified current source.
           if (args.length !== 3) return { text: HELP };
           await controller.refresh();
-          await controller.choose(controller.resolveSelector(args[1]), controller.resolveSelector(args[2]));
+          const source = controller.resolveSelector(args[1]);
+          await controller.choose(source, controller.resolveSelector(args[2], source));
           return { text: controller.statusText() };
+        }
         case 'preview': await controller.preview(); return { text: controller.statusText() };
         case 'sync': await controller.sync(); return { text: controller.statusText() };
         case 'start': await controller.start(); return { text: controller.statusText() };

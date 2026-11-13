@@ -246,16 +246,19 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File $tool -Mode Inventory -P
 
 When a Desktop Code session supplies its account ID, organization ID, and email,
 the mod checks them against the local session and remembers the label in
-`%LOCALAPPDATA%\ClaudeHistorySync\desktop-labels`. Refresh accounts in a Code
-session on each account you want labeled. Remembered labels work offline and
-apply across organizations for the same account.
+`%LOCALAPPDATA%\ClaudeHistorySync\desktop-labels`. Refresh accounts from a Code
+session in each account and organization you want verified. Verification works
+offline and applies to that exact pair. Older account-level cache entries can
+still supply an email label.
 
 Automatic lookup also reads `oauthAccount.accountUuid`, `organizationUuid`, and
-`emailAddress` from ordinary CLI `.claude.json` settings and known settings
-backups. Profiles without either source can use their short IDs for sync.
+`emailAddress`, and `organizationName` from ordinary CLI `.claude.json` settings
+and known settings backups. A matching account and organization in these settings
+also counts as verified. The standalone tool lists all local profiles and accepts
+an explicit full profile ID for sync.
 
-Profiles reports `Claude Desktop`, `CLI settings`, `User label`, `Config label`, or `Unknown` as the
-email source. `profile-labels.json` can label profiles manually:
+Profiles reports the verification status separately from the email source.
+`profile-labels.json` can label profiles manually:
 
 ```json
 {

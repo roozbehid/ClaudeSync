@@ -6,6 +6,9 @@ export function profileAccount(id) { return id.split('\\')[0].toLowerCase(); }
 export function isOtherAccount(source, target) {
   return Boolean(source && target && profileAccount(source) !== profileAccount(target));
 }
+export function destinationProfiles(view, source = view.source) {
+  return view.profiles.filter(p => (!source || isOtherAccount(source, p.Id)) && (p.Verified || view.showUnverified));
+}
 
 export function describeResult(result) {
   const mode = result.Action === 'Plan' ? 'Preview' : 'Synced';
@@ -17,7 +20,7 @@ export function describeResult(result) {
 export function createController() {
   const codex = createCodexController();
   const view = {
-    profiles: [], source: '', sourceCandidates: [], target: '', enabled: false, busy: false, spinner: '',
+    profiles: [], source: '', sourceCandidates: [], target: '', showUnverified: false, enabled: false, busy: false, spinner: '',
     status: 'Finding the account for this session…', error: '',
     backup: '', report: [], previewRows: [], previewFilter: 'all', previewChanges: 'all', previewSearch: '', previewPage: 0,
     selectedPreview: '', configPath: '', lastSync: '', copyStatus: '',
@@ -37,14 +40,13 @@ export function createController() {
   let scopeSelections = {};
 
   function defaultDestination(source) {
-    if (!source) return '';
-    const otherAccounts = view.profiles.filter(p => isOtherAccount(source, p.Id));
+    const otherAccounts = destinationProfiles(view, source).filter(p => p.Verified);
     return otherAccounts.length === 1 ? otherAccounts[0].Id : '';
   }
 
   function validateDestination(source, target) {
     if (source && target && !isOtherAccount(source, target)) throw new Error('Choose a different account.');
-    if (target && !view.profiles.some(p => p.Id === target)) throw new Error('The destination is no longer available. Refresh accounts.');
+    if (target && !destinationProfiles(view, source).some(p => p.Id === target)) throw new Error('Choose a verified destination or show unverified destinations in Accounts.');
   }
 
   function redraw() { api.redraw('ui.render'); }
@@ -266,9 +268,9 @@ export function createController() {
         debounce?.cancel(); debounce = null;
         if (previousSource) await release();
       }
-      if (view.target && !view.profiles.some(p => p.Id === view.target)) { view.target = ''; view.enabled = false; }
-      if (view.source && view.target && !isOtherAccount(view.source, view.target)) { view.target = ''; view.enabled = false; }
-      if (view.source && !view.target && previousSource !== view.source) view.target = defaultDestination(view.source);
+      const savedUnverified = view.profiles.some(p => p.Id === previousTarget && !p.Verified && isOtherAccount(view.source, p.Id));
+      if (view.target && !destinationProfiles(view).some(p => p.Id === view.target)) { view.target = ''; view.enabled = false; }
+      if (view.source && !view.target && !savedUnverified && previousSource !== view.source) view.target = defaultDestination(view.source);
       if (previousSource === view.source && previousTarget !== view.target && wasEnabled) await release();
       if (previousSource !== view.source || previousTarget !== view.target) { clearPreview(); resetScope(); restoreScope(); }
       view.status = view.source ? (view.target ? 'Check the destination, then preview or sync.' : 'Choose an inactive destination.') :
@@ -276,6 +278,12 @@ export function createController() {
         'No account folder identifies this session yet. Confirm the open account in Sync settings, or refresh after a turn.';
       return result;
     });
+  }
+  async function toggleUnverified() {
+    view.showUnverified = !view.showUnverified;
+    if (!view.showUnverified && view.target && !destinationProfiles(view).some(p => p.Id === view.target)) {
+      await choose(view.source, '');
+    } else redraw();
   }
   async function choose(source, target) {
     if (view.source && source !== view.source) throw new Error('Source is this session’s account. Switch accounts and open a fresh session to reverse the direction.');
@@ -341,7 +349,7 @@ export function createController() {
     }
     owner = await api.sessionId();
     configOverride = (await api.envGet('ACCOUNT_HISTORY_SYNC_CONFIG')) || '';
-    view.source = ''; view.sourceCandidates = [];
+    view.source = ''; view.sourceCandidates = []; view.showUnverified = false;
     const saved = await api.storeGet('destination');
     view.target = typeof saved === 'string' ? saved : '';
     const scopes = await api.storeGet('scopes');
@@ -383,15 +391,20 @@ export function createController() {
     view.status = `Session changed; auto-sync paused. ${view.status}`;
     redraw();
   }
-  function resolveSelector(selector) {
-    const matches = view.profiles.filter(p => p.Id === selector || p.Email?.toLowerCase() === selector.toLowerCase());
+  function resolveSelector(selector, source) {
+    const value = selector.toLowerCase();
+    const matching = p => [p.Id, p.Email, p.Alias].some(label => label?.toLowerCase() === value);
+    const matches = (source === undefined ? view.profiles : destinationProfiles(view, source)).filter(matching);
+    if (!matches.length && source !== undefined && !view.showUnverified && view.profiles.some(p => !p.Verified && (!source || isOtherAccount(source, p.Id)) && matching(p))) {
+      throw new Error('This destination is unverified. Confirm the open account in Accounts, then use Show unverified destinations.');
+    }
     if (matches.length !== 1) throw new Error('Profile selector is unknown or ambiguous. Use a full profile ID from /history-sync profiles.');
     return matches[0].Id;
   }
   function statusText() {
     return `${view.enabled ? 'Auto-sync active' : 'Auto-sync paused'}; ${view.source || '(confirm open account)'} → ${view.target || '(choose destination)'}. Scope: ${view.scopeLabel}. ${view.status}${view.error ? ` ${view.error}` : ''}`;
   }
-  return { view, codex, initialize, refresh, choose, preview, start, pause, sync, stop, afterTurn, reopen, resolveSelector, statusText,
+  return { view, codex, initialize, refresh, choose, preview, start, pause, sync, stop, afterTurn, reopen, resolveSelector, statusText, toggleUnverified,
     showSection, toggleDetails, choosePromptDisplay, chooseLauncherPlacement, copyText,
     filterPreview, filterPreviewChanges, searchPreview, pagePreview, selectPreview,
     chooseScope, searchScopes, loadChoices };

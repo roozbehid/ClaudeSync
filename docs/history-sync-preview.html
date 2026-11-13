@@ -196,6 +196,9 @@ function profileAccount(id) { return id.split('\\')[0].toLowerCase(); }
 function isOtherAccount(source, target) {
   return Boolean(source && target && profileAccount(source) !== profileAccount(target));
 }
+function destinationProfiles(view, source = view.source) {
+  return view.profiles.filter(p => (!source || isOtherAccount(source, p.Id)) && (p.Verified || view.showUnverified));
+}
 
 function describeResult(result) {
   const mode = result.Action === 'Plan' ? 'Preview' : 'Synced';
@@ -207,7 +210,7 @@ function describeResult(result) {
 function createController() {
   const codex = createCodexController();
   const view = {
-    profiles: [], source: '', sourceCandidates: [], target: '', enabled: false, busy: false, spinner: '',
+    profiles: [], source: '', sourceCandidates: [], target: '', showUnverified: false, enabled: false, busy: false, spinner: '',
     status: 'Finding the account for this session…', error: '',
     backup: '', report: [], previewRows: [], previewFilter: 'all', previewChanges: 'all', previewSearch: '', previewPage: 0,
     selectedPreview: '', configPath: '', lastSync: '', copyStatus: '',
@@ -227,14 +230,13 @@ function createController() {
   let scopeSelections = {};
 
   function defaultDestination(source) {
-    if (!source) return '';
-    const otherAccounts = view.profiles.filter(p => isOtherAccount(source, p.Id));
+    const otherAccounts = destinationProfiles(view, source).filter(p => p.Verified);
     return otherAccounts.length === 1 ? otherAccounts[0].Id : '';
   }
 
   function validateDestination(source, target) {
     if (source && target && !isOtherAccount(source, target)) throw new Error('Choose a different account.');
-    if (target && !view.profiles.some(p => p.Id === target)) throw new Error('The destination is no longer available. Refresh accounts.');
+    if (target && !destinationProfiles(view, source).some(p => p.Id === target)) throw new Error('Choose a verified destination or show unverified destinations in Accounts.');
   }
 
   function redraw() { api.redraw('ui.render'); }
@@ -456,9 +458,9 @@ function createController() {
         debounce?.cancel(); debounce = null;
         if (previousSource) await release();
       }
-      if (view.target && !view.profiles.some(p => p.Id === view.target)) { view.target = ''; view.enabled = false; }
-      if (view.source && view.target && !isOtherAccount(view.source, view.target)) { view.target = ''; view.enabled = false; }
-      if (view.source && !view.target && previousSource !== view.source) view.target = defaultDestination(view.source);
+      const savedUnverified = view.profiles.some(p => p.Id === previousTarget && !p.Verified && isOtherAccount(view.source, p.Id));
+      if (view.target && !destinationProfiles(view).some(p => p.Id === view.target)) { view.target = ''; view.enabled = false; }
+      if (view.source && !view.target && !savedUnverified && previousSource !== view.source) view.target = defaultDestination(view.source);
       if (previousSource === view.source && previousTarget !== view.target && wasEnabled) await release();
       if (previousSource !== view.source || previousTarget !== view.target) { clearPreview(); resetScope(); restoreScope(); }
       view.status = view.source ? (view.target ? 'Check the destination, then preview or sync.' : 'Choose an inactive destination.') :
@@ -466,6 +468,12 @@ function createController() {
         'No account folder identifies this session yet. Confirm the open account in Sync settings, or refresh after a turn.';
       return result;
     });
+  }
+  async function toggleUnverified() {
+    view.showUnverified = !view.showUnverified;
+    if (!view.showUnverified && view.target && !destinationProfiles(view).some(p => p.Id === view.target)) {
+      await choose(view.source, '');
+    } else redraw();
   }
   async function choose(source, target) {
     if (view.source && source !== view.source) throw new Error('Source is this session’s account. Switch accounts and open a fresh session to reverse the direction.');
@@ -531,7 +539,7 @@ function createController() {
     }
     owner = await api.sessionId();
     configOverride = (await api.envGet('ACCOUNT_HISTORY_SYNC_CONFIG')) || '';
-    view.source = ''; view.sourceCandidates = [];
+    view.source = ''; view.sourceCandidates = []; view.showUnverified = false;
     const saved = await api.storeGet('destination');
     view.target = typeof saved === 'string' ? saved : '';
     const scopes = await api.storeGet('scopes');
@@ -573,15 +581,20 @@ function createController() {
     view.status = `Session changed; auto-sync paused. ${view.status}`;
     redraw();
   }
-  function resolveSelector(selector) {
-    const matches = view.profiles.filter(p => p.Id === selector || p.Email?.toLowerCase() === selector.toLowerCase());
+  function resolveSelector(selector, source) {
+    const value = selector.toLowerCase();
+    const matching = p => [p.Id, p.Email, p.Alias].some(label => label?.toLowerCase() === value);
+    const matches = (source === undefined ? view.profiles : destinationProfiles(view, source)).filter(matching);
+    if (!matches.length && source !== undefined && !view.showUnverified && view.profiles.some(p => !p.Verified && (!source || isOtherAccount(source, p.Id)) && matching(p))) {
+      throw new Error('This destination is unverified. Confirm the open account in Accounts, then use Show unverified destinations.');
+    }
     if (matches.length !== 1) throw new Error('Profile selector is unknown or ambiguous. Use a full profile ID from /history-sync profiles.');
     return matches[0].Id;
   }
   function statusText() {
     return `${view.enabled ? 'Auto-sync active' : 'Auto-sync paused'}; ${view.source || '(confirm open account)'} → ${view.target || '(choose destination)'}. Scope: ${view.scopeLabel}. ${view.status}${view.error ? ` ${view.error}` : ''}`;
   }
-  return { view, codex, initialize, refresh, choose, preview, start, pause, sync, stop, afterTurn, reopen, resolveSelector, statusText,
+  return { view, codex, initialize, refresh, choose, preview, start, pause, sync, stop, afterTurn, reopen, resolveSelector, statusText, toggleUnverified,
     showSection, toggleDetails, choosePromptDisplay, chooseLauncherPlacement, copyText,
     filterPreview, filterPreviewChanges, searchPreview, pagePreview, selectPreview,
     chooseScope, searchScopes, loadChoices };
@@ -589,6 +602,8 @@ function createController() {
 
 function accountName(profile, id) {
   const account = profileAccount(id);
+  if (profile?.Alias) return profile.Alias;
+  if (profile?.OrganizationName) return [profile.OrganizationName, profile.Email].filter(Boolean).join(' · ');
   return profile?.Email || (profile?.Label && profile.Label.toLowerCase() !== account ? profile.Label : `Account ${account.slice(0, 8)}`);
 }
 function accountLabel(view, id, empty = 'Choose destination') {
@@ -597,8 +612,8 @@ function accountLabel(view, id, empty = 'Choose destination') {
   const name = accountName(profile, id);
   const duplicates = view.profiles.filter(p => p.Id !== id && accountName(p, p.Id).toLowerCase() === name.toLowerCase());
   if (!duplicates.length) return name;
-  const org = id.split('\\')[1];
-  return duplicates.some(p => p.Id.split('\\')[1] === org) ? `${name} · ${id.slice(0, 8)}` : `${name} · ${org.slice(0, 8)}`;
+  const [account, org] = id.split('\\');
+  return duplicates.some(p => p.Id.split('\\')[1] === org) ? `${name} · ${account.slice(0, 8)} / ${org.slice(0, 8)}` : `${name} · ${org.slice(0, 8)}`;
 }
 
 function mode(view) {
@@ -675,7 +690,7 @@ function renderBand({ Box, Text, Button }, controller, openSettings) {
 }
 
 function profilesText(view) {
-  return view.profiles.map(p => `${accountName(p, p.Id)} | ${p.Id} | ${p.Sessions} sessions | ${p.EmailSource || (p.Email ? 'Email known' : 'No email label')}`).join('\n');
+  return view.profiles.map(p => `${accountName(p, p.Id)} | ${p.Id} | ${p.Sessions} sessions | ${p.EmailSource || (p.Email ? 'Email known' : 'No email label')} | ${p.Verified ? 'Verified' : 'Unverified'}`).join('\n');
 }
 
 function filteredPreviewRows(view) {
@@ -832,7 +847,8 @@ function renderPane({ Box, Text, Button, Select, Input }, controller, writer = a
   let content;
   if (section === 'accounts') {
     const sourceChoices = v.profiles.filter(p => !v.sourceCandidates.length || v.sourceCandidates.includes(p.Id));
-    const destinations = v.profiles.filter(p => isOtherAccount(v.source, p.Id));
+    const destinations = v.source ? destinationProfiles(v) : [];
+    const hasUnverified = v.profiles.some(p => isOtherAccount(v.source, p.Id) && !p.Verified);
     content = [
       heading('Accounts'),
       ...(v.source ? [Text({ children: `From · ${accountLabel(v, v.source)}` })] : [
@@ -841,9 +857,10 @@ function renderPane({ Box, Text, Button, Select, Input }, controller, writer = a
           onSelect: async value => { await controller.reopen(); if (!v.busy && value) await controller.choose(value, isOtherAccount(value, v.target) ? v.target : ''); } }),
       ]),
       ...(destinations.length ? [Select({ key: 'target', label: 'To', value: v.target,
-        options: [{ value: '', label: 'Choose destination…' }, ...destinations.map(p => ({ value: p.Id, label: accountLabel(v, p.Id) }))],
+        options: [{ value: '', label: 'Choose destination…' }, ...destinations.map(p => ({ value: p.Id, label: `${accountLabel(v, p.Id)}${p.Verified ? '' : ' · Unverified'}` }))],
         onSelect: async value => { await controller.reopen(); if (!v.busy && v.source && (!value || isOtherAccount(v.source, value))) await controller.choose(v.source, value); } }),
-        note('Keep the receiving account inactive.')] : v.source ? [note('No other account found.')] : []),
+        note('Keep the receiving account inactive.')] : v.source ? [note('No verified destination found. Open History sync in a Code session on the receiving account, then return here and refresh.')] : []),
+      ...(hasUnverified ? [action(Button, controller, 'toggle-unverified', v.showUnverified ? 'Hide unverified destinations' : 'Show unverified destinations', () => controller.toggleUnverified())] : []),
       copy('copy-profiles', 'Copy profile list', () => profilesText(v)),
       row([action(Button, controller, 'refresh', 'Refresh accounts', () => controller.refresh()),
         action(Button, controller, 'continue', 'Continue to Sync', () => go('sync'), true)]),
@@ -916,8 +933,8 @@ function renderPane({ Box, Text, Button, Select, Input }, controller, writer = a
 const A = '11111111-1111-4111-8111-111111111111\\22222222-2222-4222-8222-222222222222';
 const B = '33333333-3333-4333-8333-333333333333\\44444444-4444-4444-8444-444444444444';
 const profiles = [
-  {Id:A, Email:'current@example.test', OrganizationId:A.split('\\')[1], Sessions:12},
-  {Id:B, Email:'other@example.test', OrganizationId:B.split('\\')[1], Sessions:4},
+  {Id:A, Email:'current@example.test', OrganizationId:A.split('\\')[1], Sessions:12, Verified:true},
+  {Id:B, Email:'other@example.test', OrganizationId:B.split('\\')[1], Sessions:4, Verified:true},
 ];
 let c, paneOpen = false, copies = 0, interrupted = false, ambiguous = false;
 const codexFiles=new Map(),codexPlans=new Map();let codexToken=0;

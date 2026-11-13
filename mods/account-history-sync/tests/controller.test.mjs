@@ -13,8 +13,8 @@ test('reopening on the Codex tab reloads its account catalog without importing',
 const A = '11111111-1111-4111-8111-111111111111\\22222222-2222-4222-8222-222222222222';
 const B = '33333333-3333-4333-8333-333333333333\\44444444-4444-4444-8444-444444444444';
 const profiles = [
-  { Id: A, Email: 'a@example.test', Label: 'A', OrganizationId: A.split('\\')[1], Sessions: 2 },
-  { Id: B, Email: 'b@example.test', Label: 'B', OrganizationId: B.split('\\')[1], Sessions: 1 },
+  { Id: A, Email: 'a@example.test', Label: 'A', OrganizationId: A.split('\\')[1], Sessions: 2, Verified: true },
+  { Id: B, Email: 'b@example.test', Label: 'B', OrganizationId: B.split('\\')[1], Sessions: 1, Verified: true },
 ];
 const elements = Object.fromEntries(['Box', 'Text', 'Button', 'Select', 'Input'].map(type => [type, props => ({ type, props })]));
 const flatten = tree => !tree || typeof tree !== 'object' ? [] : [tree, ...[tree.props?.children || []].flat().flatMap(flatten)];
@@ -78,9 +78,44 @@ test('replaces a saved destination in the same account and keeps the picker shor
   assert.equal(c.view.target, B);
   assert.match(profilesText(c.view), /Account 11111111 .*3 sessions.*No email label/);
   assert.ok(!h.calls.some(r => ['Arm', 'Sync'].includes(r.action)));
-  available = [...available, { Id: thirdAccount, Sessions: 1 }];
+  available = [...available, { Id: thirdAccount, Sessions: 1, Verified: true }];
   const ambiguous = createController(); await ambiguous.initialize(h.api);
   assert.equal(ambiguous.view.target, '');
+});
+test('folder-only destinations stay hidden and a saved one requires a fresh selection', async () => {
+  const extra = B.split('\\')[0] + '\\' + A.split('\\')[1];
+  const available = [profiles[0], {...profiles[1], Alias: 'Hotmail', OrganizationName: 'Personal workspace'},
+    {...profiles[1], Id: extra, Verified: false}];
+  const h = harness({ saved: {destination: extra}, respond: async action => action === 'Profiles' ? {
+    exitCode: 0, stdout: JSON.stringify({ Ok: true, Profiles: available, CurrentProfile: A, SessionProfiles: [A] }), stderr: '',
+  } : null });
+  const c = createController(); await c.initialize(h.api);
+  assert.equal(c.view.target, '');
+  assert.deepEqual(control(renderPane(elements, c), 'target').options.slice(1), [{value: B, label: 'Hotmail'}]);
+  assert.equal(c.resolveSelector('b@example.test', A), B);
+  await assert.rejects(c.choose(A, extra), /verified destination/);
+  delete available[1].Alias;
+  await c.refresh();
+  assert.match(control(renderPane(elements, c), 'target').options[1].label, /Personal workspace · b@example.test/);
+  await c.toggleUnverified();
+  assert.match(control(renderPane(elements, c), 'target').options.find(option => option.value === extra).label, /Unverified/);
+  await c.choose(A, extra);
+  await c.toggleUnverified();
+  assert.equal(c.view.target, '');
+  assert.ok(!h.calls.some(r => ['Arm', 'Sync'].includes(r.action)));
+});
+test('an ambiguous source can be confirmed after dropping a saved unverified destination', async () => {
+  const extra = B.split('\\')[0] + '\\' + A.split('\\')[1];
+  const h = harness({ saved: {destination: extra}, respond: async action => action === 'Profiles' ? {
+    exitCode: 0, stdout: JSON.stringify({ Ok: true, Profiles: [...profiles, {Id: extra, Verified: false}], SessionProfiles: [A, B] }), stderr: '',
+  } : null });
+  const c = createController(); await c.initialize(h.api);
+  assert.equal(c.view.target, '');
+  assert.throws(() => c.resolveSelector(extra, ''), /Confirm the open account.*Show unverified destinations/);
+  await c.choose('', c.resolveSelector('b@example.test', ''));
+  await control(renderPane(elements, c), 'source-confirmation').onSelect(A);
+  assert.equal(c.view.source, A);
+  assert.equal(c.view.target, B);
 });
 test('preview cannot launch a sync', async () => {
   const { c, calls } = await ready();

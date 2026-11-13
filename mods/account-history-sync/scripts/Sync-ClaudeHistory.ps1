@@ -157,7 +157,11 @@ function Get-CHEmails([string]$LabelsPath) {
             $identity = $doc['oauthAccount']
             $accountId = [string]$identity['accountUuid']; $orgId = [string]$identity['organizationUuid']; $email = [string]$identity['emailAddress']
             $id = $accountId + '\' + $orgId
-            if ($accountId -match ('^' + $script:GuidPattern + '$') -and $orgId -match ('^' + $script:GuidPattern + '$') -and $email -match '^[^\s@]+@[^\s@]+$' -and -not $emails.ContainsKey($id)) { $emails[$id] = [pscustomobject]@{Email=$email; Source='CLI settings'} }
+            if ($accountId -match ('^' + $script:GuidPattern + '$') -and $orgId -match ('^' + $script:GuidPattern + '$') -and $email -match '^[^\s@]+@[^\s@]+$' -and -not $emails.ContainsKey($id)) {
+                $name = [string]$identity['organizationName']
+                if ($name.Length -gt 160 -or $name -match '[\p{Cc}\p{Cf}]') { $name = '' }
+                $emails[$id] = [pscustomobject]@{Email=$email; Source='CLI settings'; OrganizationName=$name.Trim()}
+            }
         }
         catch { continue } # Missing/unreadable labels must not prevent listing history.
     }
@@ -175,23 +179,26 @@ function Get-CHEmails([string]$LabelsPath) {
 function Test-CHDesktopEmail([string]$Email) {
     $Email.Length -le 254 -and $Email -cmatch '^[^\s\p{C}@]+@[^\s\p{C}@]+\z'
 }
-function Get-CHDesktopEmailPath([string]$AccountId) {
-    if (-not $env:LOCALAPPDATA -or $AccountId -notmatch ('^' + $script:GuidPattern + '$')) { return }
+function Get-CHDesktopEmailPath([string]$AccountId, [string]$OrganizationId='') {
+    $guid = '^' + $script:GuidPattern + '$'
+    if (-not $env:LOCALAPPDATA -or $AccountId -notmatch $guid -or ($OrganizationId -and $OrganizationId -notmatch $guid)) { return }
     $directory = Join-Path $env:LOCALAPPDATA 'ClaudeHistorySync\desktop-labels'
-    Assert-CHPath (Join-Path $directory ($AccountId.ToLowerInvariant() + '.txt')) $env:LOCALAPPDATA
+    $key = if ($OrganizationId) { "$AccountId-$OrganizationId" } else { $AccountId }
+    Assert-CHPath (Join-Path $directory ($key.ToLowerInvariant() + '.txt')) $env:LOCALAPPDATA
 }
-function Get-CHDesktopEmail([string]$AccountId) {
+function Get-CHDesktopEmail([string]$AccountId, [string]$OrganizationId='') {
     try {
-        $path = Get-CHDesktopEmailPath $AccountId
+        $path = Get-CHDesktopEmailPath $AccountId $OrganizationId
         if (-not $path -or -not [IO.File]::Exists($path) -or [IO.FileInfo]::new($path).Length -gt 1024) { return }
         $email = [IO.File]::ReadAllText($path)
         if (Test-CHDesktopEmail $email) { $email }
     } catch { return } # Missing or unreadable labels must not prevent listing history.
 }
-function Save-CHDesktopEmail([string]$AccountId, [string]$Email) {
+function Save-CHDesktopEmail([string]$AccountId, [string]$OrganizationId, [string]$Email) {
     try {
-        if (-not (Test-CHDesktopEmail $Email) -or (Get-CHDesktopEmail $AccountId) -ceq $Email) { return }
-        $path = Get-CHDesktopEmailPath $AccountId
+        if (-not $OrganizationId -or -not (Test-CHDesktopEmail $Email) -or
+            (Get-CHDesktopEmail $AccountId $OrganizationId) -ceq $Email) { return }
+        $path = Get-CHDesktopEmailPath $AccountId $OrganizationId
         if (-not $path) { return }
         Protect-CHDirectory ([IO.Path]::GetDirectoryName($path))
         Write-CHAtomic $path ([Text.UTF8Encoding]::new($false).GetBytes($Email))
@@ -303,13 +310,17 @@ function Get-CHConfig([string]$Path, [string]$SelectorA='', [string]$SelectorB='
             $full = Assert-CHPath $org.FullName $c.SessionsRoot
             $id = $account.Name + '\' + $org.Name
             $custom = $configuredPaths[$id]
-            $email = if ($custom.Email) { [string]$custom.Email } elseif ($desktopEmail) { $desktopEmail } elseif ($emails.ContainsKey($id)) { [string]$emails[$id].Email } else { '' }
-            $emailSource = if ($custom.Email) { 'Config label' } elseif ($desktopEmail) { 'Claude Desktop' } elseif ($emails.ContainsKey($id)) { [string]$emails[$id].Source } else { 'Unknown' }
+            $identity = $emails[$id]
+            $profileEmail = Get-CHDesktopEmail $account.Name $org.Name
+            $verified = [bool]($profileEmail -or $identity.Source -eq 'CLI settings')
+            $email = if ($custom.Email) { [string]$custom.Email } elseif ($profileEmail) { $profileEmail } elseif ($identity.Email) { [string]$identity.Email } else { [string]$desktopEmail }
+            $emailSource = if ($custom.Email) { 'Config label' } elseif ($profileEmail) { 'Claude Desktop' } elseif ($identity.Email) { $identity.Source } elseif ($desktopEmail) { 'Cached account email' } else { 'Unknown' }
             if ($email -and $email -notmatch '^[^\s@]+@[^\s@]+$') { throw 'Invalid configured email label.' }
             $label = if ($email) { $email } elseif ($custom.Name) { [string]$custom.Name } else { $account.Name }
             $catalog.Add([pscustomobject]@{
                 Name=$id; Path=$id; Label=$label; Alias=[string]$custom.Name; Email=$email; EmailSource=$emailSource;
-                AccountId=$account.Name; OrganizationId=$org.Name; FullPath=$full
+                AccountId=$account.Name; OrganizationId=$org.Name; OrganizationName=[string]$identity.OrganizationName;
+                Verified=$verified; FullPath=$full
             })
         }
     }
@@ -1150,7 +1161,7 @@ if ($MyInvocation.InvocationName -ne '.') {
     if ($Mode -eq 'Profiles') {
         $discovery = Get-CHConfig $ConfigPath '' '' $false
         foreach ($p in $discovery.Catalog) {
-            [pscustomobject]@{Email=$p.Email; EmailSource=$p.EmailSource; ProfileId=$p.Name; Alias=$p.Alias; Sessions=@(Get-ChildItem -LiteralPath $p.FullPath -File -Filter 'local_*.json').Count}
+            [pscustomobject]@{Email=$p.Email; OrganizationName=$p.OrganizationName; Verified=$p.Verified; EmailSource=$p.EmailSource; ProfileId=$p.Name; Alias=$p.Alias; Sessions=@(Get-ChildItem -LiteralPath $p.FullPath -File -Filter 'local_*.json').Count}
         }
         return
     }

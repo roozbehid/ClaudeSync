@@ -97,7 +97,7 @@ try {
     $env:CLAUDE_CODE_HOST_SESSION_ID = 'local_' + $targetOnlyId
     $result = Call-Bridge Profiles -CurrentSession $targetOnlyId
     $label = $result.Profiles | Where-Object Id -eq $targetId
-    Check ($label.Email -eq 'destination@example.test' -and $label.EmailSource -eq 'Claude Desktop') 'Learns an email from a matching Desktop session'
+    Check ($label.Verified -and $label.Email -eq 'destination@example.test' -and $label.EmailSource -eq 'Claude Desktop') 'Verifies the exact Desktop profile and learns its email'
     $env:CLAUDE_CODE_USER_EMAIL = 'invalid' + [char]27 + '@example.test'
     $result = Call-Bridge Profiles -CurrentSession $targetOnlyId
     Check (($result.Profiles | Where-Object Id -eq $targetId).Email -eq 'destination@example.test') 'A control character cannot overwrite a learned label'
@@ -105,15 +105,21 @@ try {
     $env:CLAUDE_CODE_USER_EMAIL = 'source@example.test'
     $result = Call-Bridge Profiles -CurrentSession $targetOnlyId
     Check (-not ($result.Profiles | Where-Object {$_.Id -eq $sourceId -and $_.Email})) 'Rejects identity metadata from a different session account'
+    $result = Call-Bridge Profiles -CurrentSession $sessionId
+    Check (-not ($result.Profiles | Where-Object Id -eq $sourceId).Verified) 'An unrelated Desktop card ID cannot verify a matching CLI session'
     $env:CLAUDE_CODE_HOST_SESSION_ID = 'local_' + $sessionId
     $result = Call-Bridge Profiles -CurrentSession $sessionId
-    Check (@($result.Profiles | Where-Object EmailSource -eq 'Claude Desktop').Count -eq 3 -and -not $result.CurrentProfile) 'Learns the second email without changing how a copied session is identified'
+    Check (@($result.Profiles | Where-Object Verified).Count -eq 2 -and $result.CurrentProfile -eq $sourceId) 'Desktop identity resolves a copied session and verifies only the matching pair'
     foreach ($key in $identityVariables | Where-Object { $_ -ne 'LOCALAPPDATA' }) { [Environment]::SetEnvironmentVariable($key, $null, 'Process') }
     $result = Call-Bridge Profiles
-    Check (@($result.Profiles | Where-Object EmailSource -eq 'Claude Desktop').Count -eq 3 -and
+    Check (@($result.Profiles | Where-Object Verified).Count -eq 2 -and
         ($result.Profiles | Where-Object Id -eq $targetId).Email -eq 'destination@example.test' -and
-        ($result.Profiles | Where-Object Id -eq $sameAccountId).Email -eq 'source@example.test' -and
-        -not [IO.File]::Exists((Join-Path $testDirectory 'profile-labels.json'))) 'Previously seen Desktop emails remain available offline and across organizations without a manual labels file'
+        -not ($result.Profiles | Where-Object Id -eq $sameAccountId).Verified -and
+        -not [IO.File]::Exists((Join-Path $testDirectory 'profile-labels.json'))) 'Verification survives offline without spreading to another organization under the same account'
+    [IO.File]::WriteAllText((Get-CHDesktopEmailPath (($sourceId -split '\\')[0])), 'legacy@example.test')
+    $result = Call-Bridge Profiles
+    $sibling = $result.Profiles | Where-Object Id -eq $sameAccountId
+    Check ($sibling.Email -eq 'legacy@example.test' -and -not $sibling.Verified) 'Legacy cached account emails label but never verify sibling profiles'
 } finally {
     foreach ($key in $identityVariables) { [Environment]::SetEnvironmentVariable($key, $savedIdentity[$key], 'Process') }
 }

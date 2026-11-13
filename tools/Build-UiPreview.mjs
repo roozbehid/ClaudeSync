@@ -10,8 +10,8 @@ const runtime = String.raw`
 const A = '11111111-1111-4111-8111-111111111111\\22222222-2222-4222-8222-222222222222';
 const B = '33333333-3333-4333-8333-333333333333\\44444444-4444-4444-8444-444444444444';
 const profiles = [
-  {Id:A, Email:'current@example.test', OrganizationId:A.split('\\')[1], Sessions:12},
-  {Id:B, Email:'other@example.test', OrganizationId:B.split('\\')[1], Sessions:4},
+  {Id:A, Email:'current@example.test', OrganizationId:A.split('\\')[1], Sessions:12, Verified:true},
+  {Id:B, Email:'other@example.test', OrganizationId:B.split('\\')[1], Sessions:4, Verified:true},
 ];
 let c, paneOpen = false, copies = 0, interrupted = false, ambiguous = false;
 const codexFiles=new Map(),codexPlans=new Map();let codexToken=0;

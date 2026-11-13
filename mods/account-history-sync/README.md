@@ -7,20 +7,23 @@ or start automatic syncing. Copying is always from this
 session's account into the destination. The source's Desktop metadata is never
 changed. Archive indexes and cards in the destination get verified backups.
 
-The mod matches the current session ID to local Desktop history cards. A unique
-match supplies the source; check the displayed account before syncing. If the
-session appears in several profiles (including previously copied sessions), or
-has no Desktop card yet, click **Sync settings** and confirm which account is open.
+The mod matches the signed-in Desktop identity and session IDs to the local
+history card. When Desktop identity is unavailable, a unique local match supplies
+the source. If the session appears in several profiles or has no Desktop card yet,
+open **Sync settings** and confirm which account is open.
 That confirmation lasts only for this session. No global CLI login or saved source
 choice is treated as Desktop's current account. A new session card is discovered
 after a turn or on the next 30-second check.
 
-**From** shows the current profile. **To** only offers profiles under other
-accounts; it also excludes other organizations under the current account.
-If no saved destination applies and there is exactly one profile under a
-different account, it is preselected. The picker uses an email when there is
-a label for the exact profile and a short account label otherwise. Use **Copy
-profile list** for the full profile IDs, session counts, and email sources.
+**From** shows the current profile. **To** shows verified profiles under other
+accounts by default. Open History sync from a Code session on the receiving
+account to verify it, then refresh accounts from the source. Use **Show
+unverified destinations** for folders discovered on disk. A saved unverified
+destination requires a fresh selection.
+
+The picker uses the profile's configured `Name` alias, then its known organization
+name and email, then its email or short account ID. Use **Copy profile list** for
+the full profile IDs, session counts, and verification status.
 
 Pending local task suggestions can appear in a synced session until their
 original expiry. Sync leaves them for you to review and start in Claude and
@@ -214,7 +217,7 @@ for evidence and ideas from the reference UI project.
 - `/history-sync` opens the settings pane (optional unless the launcher is hidden).
 - `/history-sync accounts` opens account selection.
 - `/history-sync backups` opens recent backup receipts.
-- `/history-sync profiles` lists emails, IDs, and session counts.
+- `/history-sync profiles` lists names, IDs, session counts, and verification status.
 - `/history-sync to <destination-email-or-id>` selects the inactive destination.
 - `/history-sync preview` checks without writing Desktop history.
 - `/history-sync sync` copies once, declaring the source active and destination inactive.

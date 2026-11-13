@@ -19,11 +19,12 @@ $request = @{Action=$Action; Source=$SourceProfile; Target=$TargetProfile; Owner
 $messageBuffer = [Collections.Generic.List[object]]::new()
 try {
     . (Join-Path $PSScriptRoot 'Sync-ClaudeHistory.ps1')
-    function Get-SessionProfiles($Context) {
+    function Get-SessionProfiles($Context, [string]$HostSession='') {
         if (-not $request.Session) { return }
         if ($request.Session -notmatch ('^' + $script:GuidPattern + '$')) { throw 'Invalid current session ID.' }
         foreach ($profile in $Context.Catalog) {
             foreach ($file in Get-ChildItem -LiteralPath $profile.FullPath -File -Filter 'local_*.json') {
+                if ($HostSession -and $file.BaseName -ne $HostSession) { continue }
                 $cardPath = Assert-CHPath $file.FullName $Context.Config.SessionsRoot
                 # Never use global CLI login settings as Desktop's current identity.
                 $card = [IO.File]::ReadAllText($cardPath) | ConvertFrom-Json
@@ -65,27 +66,33 @@ try {
         $discovery = Get-CHConfig $bridgeConfig '' '' $false
         $sessionProfiles = @(Get-SessionProfiles $discovery)
         # Desktop supplies these non-credential fields to its Code worker. Match
-        # the account and organization against this session before learning a label.
+        # both the Desktop card and CLI session before verifying the profile.
         $desktopAccount = $env:CLAUDE_CODE_ACCOUNT_UUID
         $desktopProfile = $desktopAccount + '\' + $env:CLAUDE_CODE_ORGANIZATION_UUID
         $desktopEmail = $env:CLAUDE_CODE_USER_EMAIL
-        if ($env:CLAUDE_CODE_HOST_SESSION_ID -match ('^(?:local_)?' + $script:GuidPattern + '$') -and
-            $desktopProfile -in $sessionProfiles -and
+        $hostSession = $env:CLAUDE_CODE_HOST_SESSION_ID
+        $currentProfile = if ($sessionProfiles.Count -eq 1) { $sessionProfiles[0] } else { '' }
+        if ($hostSession -match ('^(?:local_)?(' + $script:GuidPattern + ')$') -and
+            $desktopProfile -in @(Get-SessionProfiles $discovery ('local_' + $Matches[1])) -and
             (Test-CHDesktopEmail $desktopEmail)) {
-            Save-CHDesktopEmail $desktopAccount $desktopEmail
+            Save-CHDesktopEmail $desktopAccount $env:CLAUDE_CODE_ORGANIZATION_UUID $desktopEmail
             foreach ($profile in $discovery.Catalog) {
-                if ($profile.AccountId -ne $desktopAccount -or $profile.EmailSource -eq 'Config label') { continue }
+                if ($profile.Name -ne $desktopProfile) { continue }
+                $currentProfile = $profile.Name
+                $profile.Verified = $true
+                if ($profile.EmailSource -eq 'Config label') { continue }
                 $profile.Email = $desktopEmail
                 $profile.Label = $desktopEmail
                 $profile.EmailSource = 'Claude Desktop'
             }
         }
         $profiles = @($discovery.Catalog | ForEach-Object {
-            [ordered]@{Id=$_.Name; Label=$_.Label; Email=$_.Email; EmailSource=$_.EmailSource;
-                OrganizationId=$_.OrganizationId; Sessions=@(Get-ChildItem -LiteralPath $_.FullPath -File -Filter 'local_*.json').Count}
+            [ordered]@{Id=$_.Name; Label=$_.Label; Alias=$_.Alias; Email=$_.Email; EmailSource=$_.EmailSource;
+                OrganizationId=$_.OrganizationId; OrganizationName=$_.OrganizationName; Verified=$_.Verified;
+                Sessions=@(Get-ChildItem -LiteralPath $_.FullPath -File -Filter 'local_*.json').Count}
         })
         $answer = [ordered]@{Ok=$true; Action='Profiles'; Profiles=$profiles; SessionProfiles=$sessionProfiles;
-            CurrentProfile=$(if ($sessionProfiles.Count -eq 1) { $sessionProfiles[0] } else { '' }); ConfigPath=$bridgeConfig}
+            CurrentProfile=$currentProfile; ConfigPath=$bridgeConfig}
     }
     elseif ($request.Action -eq 'Choices') {
         $context = Get-CHConfig $bridgeConfig $request.Source $request.Target

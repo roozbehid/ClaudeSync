@@ -4,7 +4,7 @@ for(const surface of ['terminal','desktop'] as const){
   test(`Codex import selects an independent source, previews a parent and imports once on ${surface}`,async($,on)=>{
     mock.store(on);mock.env(on,{OS:'Windows_NT'});mock.clock(on);
     const a='11111111-1111-4111-8111-111111111111\\22222222-2222-4222-8222-222222222222',b='33333333-3333-4333-8333-333333333333\\44444444-4444-4444-8444-444444444444';
-    const profiles=[{Id:a,Email:'one@example.test'},{Id:b,Email:'two@example.test'}];
+    const profiles=[{Id:a,Email:'one@example.test',Verified:true},{Id:b,Email:'two@example.test',Verified:true}];
     const sessions=Array.from({length:1002},(_,i)=>({Id:`local_00000000-0000-4000-8000-${i.toString(16).padStart(12,'0')}`,Title:`Session ${i}`,Folder:'C:\\Projects\\Sample'}));
     const snapshots=new Map<string,string>();let imports=0,token=0;
     on('fs.read',($,e)=>({value:snapshots.get(e.path.replaceAll('\\','/'))!}));
@@ -57,7 +57,7 @@ for (const surface of ['terminal','desktop'] as const) {
     on('command.register',()=>({value:undefined}));
     on('process.run',($,e)=>{
       const action=e.argv[e.argv.indexOf('-Action')+1];
-      const result=action==='Profiles'?{Ok:true,Action:action,Profiles:[{Id:a,Label:'A'},{Id:b,Label:'B'}],CurrentProfile:a,SessionProfiles:[a]}:
+      const result=action==='Profiles'?{Ok:true,Action:action,Profiles:[{Id:a,Label:'A',Verified:true},{Id:b,Label:'B',Verified:true}],CurrentProfile:a,SessionProfiles:[a]}:
         action==='Choices'?{Ok:true,Action:action,PreviewPath:'C:/private/choices.json',PreviewBytes:snapshot.length}:{Ok:true,Action:action};
       return{value:{exitCode:0,stdout:JSON.stringify(result),stderr:'',isStdoutTruncated:false,isStderrTruncated:false}};
     });
@@ -165,7 +165,7 @@ for (const surface of ['terminal','desktop'] as const) {
     on('session.start',($,e)=>({cwd:e.cwd}));
     on('process.run',($,e)=>{
       const action=e.argv[e.argv.indexOf('-Action')+1];actions.push(action);
-      const result=action==='Profiles'?{Ok:true,Profiles:[{Id:a,Email:'source@example.test',Sessions:3},{Id:b,Email:'destination@example.test',Sessions:1}],CurrentProfile:a,SessionProfiles:[a]}:
+      const result=action==='Profiles'?{Ok:true,Profiles:[{Id:a,Email:'source@example.test',Sessions:3,Verified:true},{Id:b,Email:'destination@example.test',Sessions:1,Verified:true}],CurrentProfile:a,SessionProfiles:[a]}:
         action==='Plan'?{Ok:true,Action:'Plan',Additions:1,Updates:1,Report:[],Rows:[
           {File:'local_add.json',Title:'New active work',Action:'Add',Before:null,After:{Title:'New active work',Archived:false}},
           {File:'local_update.json',Title:'Renamed work',Action:'Update',Before:{Title:'Old name',Archived:false},After:{Title:'Renamed work',Archived:true},ChangedFields:['title','isArchived']},
