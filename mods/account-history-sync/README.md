@@ -254,9 +254,11 @@ These snapshots contain history titles and should stay private.
 
 Automatic discovery handles data-root moves while the `claude-code-sessions`
 layout remains compatible; an upstream history-format change may require an update.
-Discovery creates that private config but
-does not edit history. Put `profile-labels.json` alongside it for manual email
-labels. Settings, state, and backups live outside the plugin install/cache folder.
+Discovery creates the private config and leaves history unchanged. When Desktop
+provides an email to its Code session, **Refresh accounts** remembers it for
+future syncs, including when that account is inactive. Visit each account once
+to learn its label. Manual `profile-labels.json` labels remain optional.
+Settings, labels, state, and backups live outside the plugin install/cache folder.
 
 Desktop can save a correctly named card before its CLI session starts. A missing,
 null, or empty CLI session ID now marks that card **Pending** in inventory and

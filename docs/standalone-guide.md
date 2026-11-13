@@ -244,13 +244,17 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File $tool -Mode Inventory -P
 
 ## Email labels and configuration
 
-Automatic lookup reads only `oauthAccount.accountUuid`, `organizationUuid`, and
-`emailAddress` from ordinary CLI `.claude.json` settings and known settings
-backups. It does not read `.credentials.json`, decrypt Desktop token caches,
-inspect cookies, or fetch accounts over the network. Some Desktop profiles have
-no corresponding CLI identity settings, so their emails remain unknown.
+When a Desktop Code session supplies its account ID, organization ID, and email,
+the mod checks them against the local session and remembers the label in
+`%LOCALAPPDATA%\ClaudeHistorySync\desktop-labels`. Refresh accounts in a Code
+session on each account you want labeled. Remembered labels work offline and
+apply across organizations for the same account.
 
-Profiles reports `CLI settings`, `User label`, `Config label`, or `Unknown` as the
+Automatic lookup also reads `oauthAccount.accountUuid`, `organizationUuid`, and
+`emailAddress` from ordinary CLI `.claude.json` settings and known settings
+backups. Profiles without either source can use their short IDs for sync.
+
+Profiles reports `Claude Desktop`, `CLI settings`, `User label`, `Config label`, or `Unknown` as the
 email source. `profile-labels.json` can label profiles manually:
 
 ```json
@@ -262,9 +266,9 @@ email source. `profile-labels.json` can label profiles manually:
 }
 ```
 
-Labels are selectors, not authentication. User labels are marked explicitly and
-are not represented as verified identity. Automatic identity labels take
-precedence. If an email matches several organizations/profiles, use a full profile
+Labels are selectors. An explicit config label takes precedence, followed by a
+remembered Desktop label, CLI settings, and a manual user label. If an email
+matches several organizations/profiles, use a full profile
 ID. Empty organization folders appear with zero sessions and are not selected
 automatically.
 

@@ -7,7 +7,7 @@
       "name": "account-history-sync",
       "source": "./mods/account-history-sync",
       "description": "Local Claude account history sync and selected Claude-to-Codex imports.",
-      "version": "0.6.9"
+      "version": "0.6.10"
     }
   ]
 }

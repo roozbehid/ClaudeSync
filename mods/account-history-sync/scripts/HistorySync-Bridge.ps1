@@ -63,13 +63,29 @@ try {
     $bridgeRoot = [IO.Path]::GetDirectoryName($bridgeConfig)
     if ($request.Action -eq 'Profiles') {
         $discovery = Get-CHConfig $bridgeConfig '' '' $false
+        $sessionProfiles = @(Get-SessionProfiles $discovery)
+        # Desktop supplies these non-credential fields to its Code worker. Match
+        # the account and organization against this session before learning a label.
+        $desktopAccount = $env:CLAUDE_CODE_ACCOUNT_UUID
+        $desktopProfile = $desktopAccount + '\' + $env:CLAUDE_CODE_ORGANIZATION_UUID
+        $desktopEmail = $env:CLAUDE_CODE_USER_EMAIL
+        if ($env:CLAUDE_CODE_HOST_SESSION_ID -match ('^(?:local_)?' + $script:GuidPattern + '$') -and
+            $desktopProfile -in $sessionProfiles -and
+            (Test-CHDesktopEmail $desktopEmail)) {
+            Save-CHDesktopEmail $desktopAccount $desktopEmail
+            foreach ($profile in $discovery.Catalog) {
+                if ($profile.AccountId -ne $desktopAccount -or $profile.EmailSource -eq 'Config label') { continue }
+                $profile.Email = $desktopEmail
+                $profile.Label = $desktopEmail
+                $profile.EmailSource = 'Claude Desktop'
+            }
+        }
         $profiles = @($discovery.Catalog | ForEach-Object {
             [ordered]@{Id=$_.Name; Label=$_.Label; Email=$_.Email; EmailSource=$_.EmailSource;
                 OrganizationId=$_.OrganizationId; Sessions=@(Get-ChildItem -LiteralPath $_.FullPath -File -Filter 'local_*.json').Count}
         })
-        $matches = @(Get-SessionProfiles $discovery)
-        $answer = [ordered]@{Ok=$true; Action='Profiles'; Profiles=$profiles; SessionProfiles=$matches;
-            CurrentProfile=$(if ($matches.Count -eq 1) { $matches[0] } else { '' }); ConfigPath=$bridgeConfig}
+        $answer = [ordered]@{Ok=$true; Action='Profiles'; Profiles=$profiles; SessionProfiles=$sessionProfiles;
+            CurrentProfile=$(if ($sessionProfiles.Count -eq 1) { $sessionProfiles[0] } else { '' }); ConfigPath=$bridgeConfig}
     }
     elseif ($request.Action -eq 'Choices') {
         $context = Get-CHConfig $bridgeConfig $request.Source $request.Target

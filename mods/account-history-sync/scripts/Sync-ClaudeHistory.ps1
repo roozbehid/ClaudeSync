@@ -172,6 +172,31 @@ function Get-CHEmails([string]$LabelsPath) {
     }
     $emails
 }
+function Test-CHDesktopEmail([string]$Email) {
+    $Email.Length -le 254 -and $Email -cmatch '^[^\s\p{C}@]+@[^\s\p{C}@]+\z'
+}
+function Get-CHDesktopEmailPath([string]$AccountId) {
+    if (-not $env:LOCALAPPDATA -or $AccountId -notmatch ('^' + $script:GuidPattern + '$')) { return }
+    $directory = Join-Path $env:LOCALAPPDATA 'ClaudeHistorySync\desktop-labels'
+    Assert-CHPath (Join-Path $directory ($AccountId.ToLowerInvariant() + '.txt')) $env:LOCALAPPDATA
+}
+function Get-CHDesktopEmail([string]$AccountId) {
+    try {
+        $path = Get-CHDesktopEmailPath $AccountId
+        if (-not $path -or -not [IO.File]::Exists($path) -or [IO.FileInfo]::new($path).Length -gt 1024) { return }
+        $email = [IO.File]::ReadAllText($path)
+        if (Test-CHDesktopEmail $email) { $email }
+    } catch { return } # Missing or unreadable labels must not prevent listing history.
+}
+function Save-CHDesktopEmail([string]$AccountId, [string]$Email) {
+    try {
+        if (-not (Test-CHDesktopEmail $Email) -or (Get-CHDesktopEmail $AccountId) -ceq $Email) { return }
+        $path = Get-CHDesktopEmailPath $AccountId
+        if (-not $path) { return }
+        Protect-CHDirectory ([IO.Path]::GetDirectoryName($path))
+        Write-CHAtomic $path ([Text.UTF8Encoding]::new($false).GetBytes($Email))
+    } catch { return } # Label caching is best effort and independent of sync.
+}
 function Get-CHDesktopDataRoots {
     # Electron children advertise the data directory even when the main process
     # does not. This follows relocations without depending on an app version,
@@ -272,13 +297,14 @@ function Get-CHConfig([string]$Path, [string]$SelectorA='', [string]$SelectorB='
     foreach ($account in Get-ChildItem -LiteralPath $c.SessionsRoot -Directory -Force) {
         if ($account.Name -notmatch ('^' + $script:GuidPattern + '$')) { continue }
         [void](Assert-CHPath $account.FullName $c.SessionsRoot)
+        $desktopEmail = Get-CHDesktopEmail $account.Name
         foreach ($org in Get-ChildItem -LiteralPath $account.FullName -Directory -Force) {
             if ($org.Name -notmatch ('^' + $script:GuidPattern + '$')) { continue }
             $full = Assert-CHPath $org.FullName $c.SessionsRoot
             $id = $account.Name + '\' + $org.Name
             $custom = $configuredPaths[$id]
-            $email = if ($custom.Email) { [string]$custom.Email } elseif ($emails.ContainsKey($id)) { [string]$emails[$id].Email } else { '' }
-            $emailSource = if ($custom.Email) { 'Config label' } elseif ($emails.ContainsKey($id)) { [string]$emails[$id].Source } else { 'Unknown' }
+            $email = if ($custom.Email) { [string]$custom.Email } elseif ($desktopEmail) { $desktopEmail } elseif ($emails.ContainsKey($id)) { [string]$emails[$id].Email } else { '' }
+            $emailSource = if ($custom.Email) { 'Config label' } elseif ($desktopEmail) { 'Claude Desktop' } elseif ($emails.ContainsKey($id)) { [string]$emails[$id].Source } else { 'Unknown' }
             if ($email -and $email -notmatch '^[^\s@]+@[^\s@]+$') { throw 'Invalid configured email label.' }
             $label = if ($email) { $email } elseif ($custom.Name) { [string]$custom.Name } else { $account.Name }
             $catalog.Add([pscustomobject]@{

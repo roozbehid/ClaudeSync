@@ -147,10 +147,11 @@ transaction with Desktop. See [Backups and Undo](docs/standalone-guide.md#backup
 
 ## Configuration and privacy
 
-The included `profiles.json` uses automatic Desktop discovery and has no saved
-account pair. For manual labels, copy `profile-labels.example.json` to
-`profile-labels.json` and replace its synthetic values locally. That local labels
-file is ignored by Git.
+The included `profiles.json` discovers Desktop profiles automatically. When
+Desktop supplies an email to Code, the mod remembers it locally for future
+syncs. Open a Code session and refresh the account list once in each account
+you want labeled. Manual labels are optional. If you use
+`profile-labels.json`, Git ignores it.
 
 For customized roots and saved pairs, use a private configuration outside the
 checkout, or an ignored `profiles.local.json`, and pass `-ConfigPath`.

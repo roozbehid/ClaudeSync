@@ -84,6 +84,39 @@ $result = Call-Bridge Profiles -CurrentSession $sessionId
 Check ($result.SessionProfiles.Count -eq 2 -and -not $result.CurrentProfile) 'A copied session does not falsely identify the current account'
 $result = Call-Bridge Profiles -CurrentSession $targetOnlyId
 Check ($result.CurrentProfile -eq $targetId -and $result.SessionProfiles.Count -eq 1) 'Unique current session identifies its local profile'
+$identityVariables = @('LOCALAPPDATA','CLAUDE_CODE_HOST_SESSION_ID','CLAUDE_CODE_ACCOUNT_UUID','CLAUDE_CODE_ORGANIZATION_UUID','CLAUDE_CODE_USER_EMAIL')
+$savedIdentity = @{}
+foreach ($key in $identityVariables) { $savedIdentity[$key] = [Environment]::GetEnvironmentVariable($key, 'Process') }
+try {
+    $env:LOCALAPPDATA = Join-Path $testDirectory 'Label fixtures'
+    $env:CLAUDE_CODE_ACCOUNT_UUID, $env:CLAUDE_CODE_ORGANIZATION_UUID = $targetId -split '\\'
+    $env:CLAUDE_CODE_USER_EMAIL = 'destination@example.test'
+    [Environment]::SetEnvironmentVariable('CLAUDE_CODE_HOST_SESSION_ID', $null, 'Process')
+    $result = Call-Bridge Profiles -CurrentSession $targetOnlyId
+    Check (-not ($result.Profiles | Where-Object EmailSource -eq 'Claude Desktop')) 'CLI-only discovery cannot learn a Desktop label'
+    $env:CLAUDE_CODE_HOST_SESSION_ID = 'local_' + $targetOnlyId
+    $result = Call-Bridge Profiles -CurrentSession $targetOnlyId
+    $label = $result.Profiles | Where-Object Id -eq $targetId
+    Check ($label.Email -eq 'destination@example.test' -and $label.EmailSource -eq 'Claude Desktop') 'Learns an email from a matching Desktop session'
+    $env:CLAUDE_CODE_USER_EMAIL = 'invalid' + [char]27 + '@example.test'
+    $result = Call-Bridge Profiles -CurrentSession $targetOnlyId
+    Check (($result.Profiles | Where-Object Id -eq $targetId).Email -eq 'destination@example.test') 'A control character cannot overwrite a learned label'
+    $env:CLAUDE_CODE_ACCOUNT_UUID, $env:CLAUDE_CODE_ORGANIZATION_UUID = $sourceId -split '\\'
+    $env:CLAUDE_CODE_USER_EMAIL = 'source@example.test'
+    $result = Call-Bridge Profiles -CurrentSession $targetOnlyId
+    Check (-not ($result.Profiles | Where-Object {$_.Id -eq $sourceId -and $_.Email})) 'Rejects identity metadata from a different session account'
+    $env:CLAUDE_CODE_HOST_SESSION_ID = 'local_' + $sessionId
+    $result = Call-Bridge Profiles -CurrentSession $sessionId
+    Check (@($result.Profiles | Where-Object EmailSource -eq 'Claude Desktop').Count -eq 3 -and -not $result.CurrentProfile) 'Learns the second email without changing how a copied session is identified'
+    foreach ($key in $identityVariables | Where-Object { $_ -ne 'LOCALAPPDATA' }) { [Environment]::SetEnvironmentVariable($key, $null, 'Process') }
+    $result = Call-Bridge Profiles
+    Check (@($result.Profiles | Where-Object EmailSource -eq 'Claude Desktop').Count -eq 3 -and
+        ($result.Profiles | Where-Object Id -eq $targetId).Email -eq 'destination@example.test' -and
+        ($result.Profiles | Where-Object Id -eq $sameAccountId).Email -eq 'source@example.test' -and
+        -not [IO.File]::Exists((Join-Path $testDirectory 'profile-labels.json'))) 'Previously seen Desktop emails remain available offline and across organizations without a manual labels file'
+} finally {
+    foreach ($key in $identityVariables) { [Environment]::SetEnvironmentVariable($key, $savedIdentity[$key], 'Process') }
+}
 $result = Call-Bridge Profiles -CurrentSession 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'
 Check (-not $result.CurrentProfile -and $result.SessionProfiles.Count -eq 0) 'New or CLI-only session has no guessed source'
 $result = Call-Bridge Profiles -CurrentSession 'invalid'
